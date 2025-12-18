@@ -113,7 +113,9 @@ impl EventListener for EmacEventListener {
             }
             Event::PtyWrite(data) => {
                 // Write PTY responses (like DA1 response) immediately back to PTY
-                let _ = self.pty_writer.send(Msg::Input(Cow::Owned(data.into_bytes())));
+                let _ = self
+                    .pty_writer
+                    .send(Msg::Input(Cow::Owned(data.into_bytes())));
             }
             Event::CursorBlinkingChange => {
                 let _ = self.sender.send(TermEvent::CursorBlinkingChange);
@@ -140,11 +142,10 @@ impl AlacrittyTerm {
     fn new(cols: usize, lines: usize, shell: Option<String>) -> std::result::Result<Self, String> {
         let size = TermSize::new(cols, lines);
         let (event_tx, event_rx) = channel();
-        
+
         // Setup PTY options
-        let shell_program = shell.unwrap_or_else(|| {
-            std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
-        });
+        let shell_program = shell
+            .unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()));
 
         let pty_config = PtyOptions {
             shell: Some(Shell::new(shell_program, vec![])),
@@ -160,7 +161,7 @@ impl AlacrittyTerm {
         // We need to create a dummy event listener first, then update it
         // Actually, let's use a channel-based approach where we forward PTY writes
         let (pty_write_tx, pty_write_rx) = channel::<Msg>();
-        
+
         // Create the event listener with the PTY write channel
         let event_listener = EmacEventListener::new(event_tx, pty_write_tx);
 
@@ -170,21 +171,15 @@ impl AlacrittyTerm {
         let term = Arc::new(FairMutex::new(term));
 
         // Create and spawn the event loop
-        let event_loop = EventLoop::new(
-            term.clone(),
-            event_listener,
-            pty,
-            false,
-            false,
-        )
-        .map_err(|e| format!("Failed to create event loop: {}", e))?;
+        let event_loop = EventLoop::new(term.clone(), event_listener, pty, false, false)
+            .map_err(|e| format!("Failed to create event loop: {}", e))?;
 
         let pty_channel = event_loop.channel();
         let pty_tx = Notifier(pty_channel.clone());
 
         // Spawn the event loop in a background thread
         let _event_loop_handle = event_loop.spawn();
-        
+
         // Spawn a thread to forward PTY write requests from the event listener
         // to the actual PTY channel
         std::thread::spawn(move || {
@@ -211,7 +206,7 @@ impl AlacrittyTerm {
         let mut size = self.size.lock();
         size.cols = cols;
         size.lines = lines;
-        
+
         let window_size = WindowSize::from(*size);
         self.term.lock().resize(*size);
         let _ = self.pty_tx.0.send(Msg::Resize(window_size));
@@ -269,7 +264,11 @@ impl AlacrittyTerm {
         let term = self.term.lock();
         let cursor = term.grid().cursor.point;
         // Line can be negative in alacritty (for scrollback), clamp to 0
-        let line = if cursor.line.0 < 0 { 0 } else { cursor.line.0 as usize };
+        let line = if cursor.line.0 < 0 {
+            0
+        } else {
+            cursor.line.0 as usize
+        };
         (line, cursor.column.0)
     }
 
@@ -359,8 +358,7 @@ fn init(_env: &Env) -> Result<()> {
 /// Returns a user pointer to the terminal state
 #[defun(user_ptr)]
 fn create(cols: i64, lines: i64, shell: Option<String>) -> Result<AlacrittyTerm> {
-    AlacrittyTerm::new(cols as usize, lines as usize, shell)
-        .map_err(|e| emacs::Error::msg(e))
+    AlacrittyTerm::new(cols as usize, lines as usize, shell).map_err(|e| emacs::Error::msg(e))
 }
 
 /// Write data to the terminal PTY (send input to the shell)
@@ -381,6 +379,124 @@ fn resize(term: &AlacrittyTerm, cols: i64, lines: i64) -> Result<()> {
 #[defun]
 fn get_text(term: &AlacrittyTerm) -> Result<String> {
     Ok(term.get_content())
+}
+
+/// Get the terminal content with styling information
+/// Returns a list of lines, where each line is a list of styled segments:
+/// ((text fg-color bg-color bold italic underline) ...)
+#[defun]
+fn get_styled_content<'e>(env: &'e Env, term: &AlacrittyTerm) -> Result<Value<'e>> {
+    let term_lock = term.term.lock();
+    let grid = term_lock.grid();
+
+    let mut lines_list = env.intern("nil")?;
+
+    // Process lines in reverse order so we can build the list with cons
+    for line_idx in (0..grid.screen_lines()).rev() {
+        let row = &grid[Line(line_idx as i32)];
+        let mut segments_list = env.intern("nil")?;
+
+        // Group consecutive cells with the same attributes
+        let mut current_text = String::new();
+        let mut current_fg: Option<(u8, u8, u8)> = None;
+        let mut current_bg: Option<(u8, u8, u8)> = None;
+        let mut current_flags: Option<CellFlags> = None;
+
+        for col_idx in (0..grid.columns()).rev() {
+            let cell = &row[Column(col_idx)];
+            let c = if cell.c == '\0' { ' ' } else { cell.c };
+
+            let fg = color_to_rgb(&cell.fg);
+            let bg = color_to_rgb(&cell.bg);
+            let flags = cell.flags;
+
+            // Check if attributes changed
+            let attrs_match =
+                current_fg == Some(fg) && current_bg == Some(bg) && current_flags == Some(flags);
+
+            if !attrs_match && !current_text.is_empty() {
+                // Emit current segment (text is reversed, so reverse it back)
+                let text: String = current_text.chars().rev().collect();
+                let segment = make_segment(
+                    env,
+                    &text,
+                    current_fg.unwrap(),
+                    current_bg.unwrap(),
+                    current_flags.unwrap(),
+                )?;
+                segments_list = env.cons(segment, segments_list)?;
+                current_text.clear();
+            }
+
+            current_text.push(c);
+            current_fg = Some(fg);
+            current_bg = Some(bg);
+            current_flags = Some(flags);
+        }
+
+        // Emit final segment for the line
+        if !current_text.is_empty() {
+            let text: String = current_text.chars().rev().collect();
+            let segment = make_segment(
+                env,
+                &text,
+                current_fg.unwrap(),
+                current_bg.unwrap(),
+                current_flags.unwrap(),
+            )?;
+            segments_list = env.cons(segment, segments_list)?;
+        }
+
+        lines_list = env.cons(segments_list, lines_list)?;
+    }
+
+    Ok(lines_list)
+}
+
+/// Helper to create a segment: (text fg-color bg-color bold italic underline inverse)
+fn make_segment<'e>(
+    env: &'e Env,
+    text: &str,
+    fg: (u8, u8, u8),
+    bg: (u8, u8, u8),
+    flags: CellFlags,
+) -> Result<Value<'e>> {
+    let text_val = text.into_lisp(env)?;
+    let fg_val = format!("#{:02x}{:02x}{:02x}", fg.0, fg.1, fg.2).into_lisp(env)?;
+    let bg_val = format!("#{:02x}{:02x}{:02x}", bg.0, bg.1, bg.2).into_lisp(env)?;
+
+    let bold = if flags.contains(CellFlags::BOLD) {
+        env.intern("t")?
+    } else {
+        env.intern("nil")?
+    };
+    let italic = if flags.contains(CellFlags::ITALIC) {
+        env.intern("t")?
+    } else {
+        env.intern("nil")?
+    };
+    let underline = if flags.contains(CellFlags::UNDERLINE) {
+        env.intern("t")?
+    } else {
+        env.intern("nil")?
+    };
+    let inverse = if flags.contains(CellFlags::INVERSE) {
+        env.intern("t")?
+    } else {
+        env.intern("nil")?
+    };
+
+    // Build list: (text fg bg bold italic underline inverse)
+    let nil = env.intern("nil")?;
+    let result = env.cons(inverse, nil)?;
+    let result = env.cons(underline, result)?;
+    let result = env.cons(italic, result)?;
+    let result = env.cons(bold, result)?;
+    let result = env.cons(bg_val, result)?;
+    let result = env.cons(fg_val, result)?;
+    let result = env.cons(text_val, result)?;
+
+    Ok(result)
 }
 
 /// Get the cursor row (0-indexed)
@@ -526,10 +642,10 @@ fn get_cell<'e>(env: &'e Env, term: &AlacrittyTerm, row: i64, col: i64) -> Resul
 
     // Create a list with cell information
     let char_str = cell.c.to_string().into_lisp(env)?;
-    
+
     let (fg_r, fg_g, fg_b) = color_to_rgb(&cell.fg);
     let (bg_r, bg_g, bg_b) = color_to_rgb(&cell.bg);
-    
+
     let fg_color = format!("#{:02x}{:02x}{:02x}", fg_r, fg_g, fg_b).into_lisp(env)?;
     let bg_color = format!("#{:02x}{:02x}{:02x}", bg_r, bg_g, bg_b).into_lisp(env)?;
 

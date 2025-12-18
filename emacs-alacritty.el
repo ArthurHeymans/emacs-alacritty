@@ -294,29 +294,76 @@ received from the terminal and FUNCTION is the Emacs function to call."
             (emacs-alacritty--handle-exit)
             (cl-return-from emacs-alacritty--refresh))
           
-          ;; Update display
-          (let* ((content (emacs-alacritty-get-text emacs-alacritty--term))
+          ;; Update display with styled content
+          (let* ((styled-lines (emacs-alacritty-get-styled-content emacs-alacritty--term))
                  (cursor-row (emacs-alacritty-cursor-row emacs-alacritty--term))
-                 (cursor-col (emacs-alacritty-cursor-col emacs-alacritty--term))
-                 (point-was (point)))
-            ;; Only update if we have content
+                 (cursor-col (emacs-alacritty-cursor-col emacs-alacritty--term)))
             (erase-buffer)
-            (insert content)
-            ;; Ensure buffer ends with newline for proper line handling
-            (unless (or (= (point-max) (point-min))
-                        (= (char-before (point-max)) ?\n))
-              (goto-char (point-max))
+            ;; Insert styled content
+            (dolist (line styled-lines)
+              (dolist (segment line)
+                (emacs-alacritty--insert-styled-segment segment))
               (insert "\n"))
             ;; Position cursor
             (goto-char (point-min))
             (forward-line cursor-row)
             (let ((line-end (line-end-position)))
               (move-to-column cursor-col)
-              ;; If cursor would be beyond line end, go to line end
               (when (> (point) line-end)
                 (goto-char line-end)))))
       (error
        (message "emacs-alacritty refresh error: %s" (error-message-string err))))))
+
+(defcustom emacs-alacritty-default-bg "#000000"
+  "Default terminal background color.
+This color will not be applied, allowing Emacs default background to show through."
+  :type 'string
+  :group 'emacs-alacritty)
+
+(defcustom emacs-alacritty-default-fg "#e5e5e5"
+  "Default terminal foreground color.
+This color will not be applied, using Emacs default foreground instead."
+  :type 'string
+  :group 'emacs-alacritty)
+
+(defun emacs-alacritty--insert-styled-segment (segment)
+  "Insert a styled SEGMENT into the buffer.
+SEGMENT is (text fg-color bg-color bold italic underline inverse)."
+  (let* ((text (nth 0 segment))
+         (fg (nth 1 segment))
+         (bg (nth 2 segment))
+         (bold (nth 3 segment))
+         (italic (nth 4 segment))
+         (underline (nth 5 segment))
+         (inverse (nth 6 segment))
+         (start (point))
+         (face-attrs nil))
+    ;; Handle inverse video
+    (when inverse
+      (let ((temp fg))
+        (setq fg bg)
+        (setq bg temp)))
+    ;; Build face attributes - skip default colors to allow Emacs theme to show through
+    (when (and fg (not (string-equal-ignore-case fg emacs-alacritty-default-fg)))
+      (push :foreground face-attrs)
+      (push fg face-attrs))
+    (when (and bg (not (string-equal-ignore-case bg emacs-alacritty-default-bg)))
+      (push :background face-attrs)
+      (push bg face-attrs))
+    (when bold
+      (push :weight face-attrs)
+      (push 'bold face-attrs))
+    (when italic
+      (push :slant face-attrs)
+      (push 'italic face-attrs))
+    (when underline
+      (push :underline face-attrs)
+      (push t face-attrs))
+    ;; Insert text
+    (insert text)
+    ;; Apply face if we have attributes
+    (when face-attrs
+      (add-face-text-property start (point) (nreverse face-attrs)))))
 
 (defun emacs-alacritty--process-events ()
   "Process pending terminal events."
