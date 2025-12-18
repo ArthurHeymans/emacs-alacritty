@@ -35,6 +35,7 @@
 (require 'cl-lib)
 (require 'subr-x)
 (require 'tramp)
+(require 'bookmark)
 
 ;; Declare functions provided by the dynamic module
 (declare-function emacs-alacritty-create "emacs-alacritty")
@@ -177,6 +178,11 @@ received from the terminal and FUNCTION is the Emacs function to call."
 If nil, cursor in any window may begin to blink or not blink because
 `blink-cursor-mode' is a global minor mode in Emacs.
 You can use `M-x blink-cursor-mode' to toggle manually."
+  :type 'boolean
+  :group 'emacs-alacritty)
+
+(defcustom emacs-alacritty-bookmark-check-dir t
+  "When non-nil, restore directory when restoring a bookmark."
   :type 'boolean
   :group 'emacs-alacritty)
 
@@ -783,6 +789,8 @@ a shell there using `emacs-alacritty-tramp-shells'."
   (setq-local hscroll-margin 0)
   (setq-local hscroll-step 1)
   (setq-local auto-hscroll-mode 'current-line)
+  ;; Bookmark support
+  (setq-local bookmark-make-record-function #'emacs-alacritty--bookmark-make-record)
   ;; Environment variables for shell
   (setenv "TERM" "xterm-256color")
   (setenv "COLORTERM" "truecolor")
@@ -999,6 +1007,58 @@ Fake newlines are automatically removed from the copied text."
   (interactive "sSend string: ")
   (when emacs-alacritty--term
     (emacs-alacritty-write-input emacs-alacritty--term string)))
+
+;; Bookmark support
+
+(defun emacs-alacritty--bookmark-make-record ()
+  "Create a bookmark for the current terminal.
+Records the current directory and buffer name."
+  `(nil
+    (handler . emacs-alacritty--bookmark-handler)
+    (thisdir . ,default-directory)
+    (buf-name . ,(buffer-name))
+    (defaults . nil)))
+
+;;;###autoload
+(defun emacs-alacritty--bookmark-handler (bmk)
+  "Handler to restore a terminal bookmark BMK.
+If a terminal buffer of the same name does not exist, creates a new one.
+Also checks the current directory and sets it to the bookmarked directory
+if `emacs-alacritty-bookmark-check-dir' is non-nil."
+  (let* ((thisdir (bookmark-prop-get bmk 'thisdir))
+         (buf-name (bookmark-prop-get bmk 'buf-name))
+         (buf (get-buffer buf-name))
+         (thismode (and buf (with-current-buffer buf major-mode))))
+    ;; Create if no such terminal buffer exists
+    (when (or (not buf) (not (eq thismode 'emacs-alacritty-mode)))
+      (setq buf (generate-new-buffer buf-name))
+      (with-current-buffer buf
+        (when emacs-alacritty-bookmark-check-dir
+          (setq default-directory thisdir))
+        (emacs-alacritty-mode)
+        ;; Initialize the terminal
+        (let ((size (emacs-alacritty--get-window-size)))
+          (setq emacs-alacritty--term
+                (emacs-alacritty-create (car size) (cdr size)
+                                        (emacs-alacritty--get-command)))
+          (setq emacs-alacritty--timer
+                (run-with-timer 0.1 emacs-alacritty-timer-interval
+                                (let ((buffer buf))
+                                  (lambda ()
+                                    (when (buffer-live-p buffer)
+                                      (with-current-buffer buffer
+                                        (emacs-alacritty--refresh)))))))
+          (emacs-alacritty--setup-window-hooks))))
+    ;; Check the current directory
+    (with-current-buffer buf
+      (when (and emacs-alacritty-bookmark-check-dir
+                 (not (string-equal default-directory thisdir)))
+        (when emacs-alacritty--copy-mode
+          (emacs-alacritty-copy-mode))
+        (emacs-alacritty-write-input emacs-alacritty--term (concat "cd " thisdir))
+        (emacs-alacritty--send-key "return")))
+    ;; Set to this terminal buffer
+    (set-buffer buf)))
 
 (provide 'emacs-alacritty)
 ;;; emacs-alacritty.el ends here
