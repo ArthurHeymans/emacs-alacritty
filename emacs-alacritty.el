@@ -36,6 +36,22 @@
 (require 'subr-x)
 (require 'tramp)
 
+;; Declare functions provided by the dynamic module
+(declare-function emacs-alacritty-create "emacs-alacritty")
+(declare-function emacs-alacritty-resize "emacs-alacritty")
+(declare-function emacs-alacritty-write-input "emacs-alacritty")
+(declare-function emacs-alacritty-get-text "emacs-alacritty")
+(declare-function emacs-alacritty-get-styled-content "emacs-alacritty")
+(declare-function emacs-alacritty-cursor-row "emacs-alacritty")
+(declare-function emacs-alacritty-cursor-col "emacs-alacritty")
+(declare-function emacs-alacritty-is-exited "emacs-alacritty")
+(declare-function emacs-alacritty-get-title "emacs-alacritty")
+(declare-function emacs-alacritty-poll-events "emacs-alacritty")
+(declare-function emacs-alacritty-send-key "emacs-alacritty")
+(declare-function emacs-alacritty-send-char "emacs-alacritty")
+(declare-function emacs-alacritty-paste "emacs-alacritty")
+(declare-function emacs-alacritty-line-wraps "emacs-alacritty")
+
 ;; Load the dynamic module
 (defvar emacs-alacritty-module-path nil
   "Path to the emacs-alacritty dynamic module.")
@@ -129,6 +145,19 @@ will fall back to tramp's shell."
   :type 'string
   :group 'emacs-alacritty)
 
+(defcustom emacs-alacritty-copy-exclude-prompt nil
+  "When non-nil, exclude the prompt from copied lines in copy mode.
+This uses prompt tracking to identify prompt regions."
+  :type 'boolean
+  :group 'emacs-alacritty)
+
+(defcustom emacs-alacritty-copy-mode-remove-fake-newlines t
+  "When non-nil, remove fake newlines when copying text in copy mode.
+Fake newlines are inserted by the terminal when a line wraps due to
+the terminal width. Removing them produces cleaner output."
+  :type 'boolean
+  :group 'emacs-alacritty)
+
 (defcustom emacs-alacritty-eval-cmds
   '(("find-file" find-file)
     ("message" message)
@@ -198,6 +227,15 @@ received from the terminal and FUNCTION is the Emacs function to call."
 (defvar-local emacs-alacritty--copy-mode nil
   "Whether copy mode is enabled.")
 
+(defvar-local emacs-alacritty--fake-newlines nil
+  "List of line numbers (1-indexed) that have fake newlines.
+These are lines that wrap due to terminal width rather than having
+actual newline characters.")
+
+(defvar-local emacs-alacritty--prompt-end nil
+  "Buffer position of the end of the last prompt.
+Used for excluding prompts when copying.")
+
 ;; Mode map
 
 (defvar emacs-alacritty-mode-map
@@ -257,7 +295,10 @@ received from the terminal and FUNCTION is the Emacs function to call."
     (define-key map (kbd "C-u") (lambda () (interactive) (emacs-alacritty--send-char ?u "C")))
     (define-key map (kbd "C-w") (lambda () (interactive) (emacs-alacritty--send-char ?w "C")))
     (define-key map (kbd "C-y") #'emacs-alacritty-yank)
+    (define-key map (kbd "M-y") #'emacs-alacritty-yank-pop)
     (define-key map (kbd "C-z") (lambda () (interactive) (emacs-alacritty--send-char ?z "C")))
+    (define-key map [mouse-2] #'emacs-alacritty-yank-primary)
+    (define-key map [remap mouse-yank-primary] #'emacs-alacritty-yank-primary)
     
     ;; Emacs-specific commands
     (define-key map (kbd "C-c C-t") #'emacs-alacritty-copy-mode)
@@ -326,13 +367,21 @@ received from the terminal and FUNCTION is the Emacs function to call."
           ;; Update display with styled content
           (let* ((styled-lines (emacs-alacritty-get-styled-content emacs-alacritty--term))
                  (cursor-row (emacs-alacritty-cursor-row emacs-alacritty--term))
-                 (cursor-col (emacs-alacritty-cursor-col emacs-alacritty--term)))
+                 (cursor-col (emacs-alacritty-cursor-col emacs-alacritty--term))
+                 (line-num 0)
+                 (fake-newlines nil))
             (erase-buffer)
-            ;; Insert styled content
+            ;; Insert styled content and track fake newlines
             (dolist (line styled-lines)
               (dolist (segment line)
                 (emacs-alacritty--insert-styled-segment segment))
-              (insert "\n"))
+              ;; Check if this line wraps (has a fake newline)
+              (when (emacs-alacritty-line-wraps emacs-alacritty--term line-num)
+                (push (1+ line-num) fake-newlines))  ; Store 1-indexed line number
+              (insert "\n")
+              (setq line-num (1+ line-num)))
+            ;; Store fake newlines for copy mode
+            (setq emacs-alacritty--fake-newlines (nreverse fake-newlines))
             ;; Position cursor
             ;; The terminal cursor position is in terms of terminal columns (0-indexed).
             ;; We need to translate this to buffer position accounting for character widths.
@@ -791,11 +840,37 @@ a shell there using `emacs-alacritty-tramp-shells'."
   (interactive)
   (emacs-alacritty--send-key "insert"))
 
-(defun emacs-alacritty-yank ()
-  "Paste from kill ring to terminal."
+(defun emacs-alacritty--insert-for-yank (text)
+  "Send TEXT to the terminal instead of inserting in buffer.
+This is used to override `insert-for-yank' during yank operations."
+  (when (and emacs-alacritty--term text)
+    (emacs-alacritty-paste emacs-alacritty--term text)))
+
+(defun emacs-alacritty-yank (&optional arg)
+  "Paste from kill ring to terminal.
+ARG is passed to `yank'."
+  (interactive "P")
+  (deactivate-mark)
+  (let ((inhibit-read-only t))
+    (cl-letf (((symbol-function 'insert-for-yank) #'emacs-alacritty--insert-for-yank))
+      (yank arg))))
+
+(defun emacs-alacritty-yank-pop (&optional arg)
+  "Cycle through kill ring and paste to terminal.
+ARG is passed to `yank-pop'."
+  (interactive "p")
+  (let ((inhibit-read-only t)
+        (yank-undo-function (lambda (_start _end) nil)))  ; No-op undo
+    (cl-letf (((symbol-function 'insert-for-yank) #'emacs-alacritty--insert-for-yank))
+      (yank-pop arg))))
+
+(defun emacs-alacritty-yank-primary ()
+  "Paste the primary selection to the terminal."
   (interactive)
-  (when (and emacs-alacritty--term (current-kill 0 t))
-    (emacs-alacritty-paste emacs-alacritty--term (current-kill 0))))
+  (when emacs-alacritty--term
+    (let ((primary (gui-get-primary-selection)))
+      (when (and primary (not (string-empty-p primary)))
+        (emacs-alacritty-paste emacs-alacritty--term primary)))))
 
 (defun emacs-alacritty-send-next-key ()
   "Read the next key and send it to the terminal."
@@ -806,25 +881,82 @@ a shell there using `emacs-alacritty-tramp-shells'."
 
 ;; Copy mode
 
+(defun emacs-alacritty--remove-fake-newlines (text start-line)
+  "Remove fake newlines from TEXT.
+START-LINE is the 1-indexed line number where the text starts.
+Fake newlines are identified by checking `emacs-alacritty--fake-newlines'."
+  (if (or (not emacs-alacritty-copy-mode-remove-fake-newlines)
+          (null emacs-alacritty--fake-newlines))
+      text
+    (let ((lines (split-string text "\n"))
+          (result nil)
+          (current-line start-line))
+      (dolist (line lines)
+        (if (memq current-line emacs-alacritty--fake-newlines)
+            ;; This line has a fake newline - don't add newline after it
+            (setq result (concat result line))
+          ;; Real newline
+          (setq result (if result
+                           (concat result "\n" line)
+                         line)))
+        (setq current-line (1+ current-line)))
+      result)))
+
+(defun emacs-alacritty--get-prompt-end ()
+  "Get the buffer position of the end of the prompt on the current line.
+Returns nil if no prompt is detected."
+  ;; The prompt end is typically marked by shell integration.
+  ;; For now, we use a heuristic: look for common prompt patterns.
+  ;; Users can customize `emacs-alacritty--prompt-end' if needed.
+  emacs-alacritty--prompt-end)
+
+(defun emacs-alacritty--filter-buffer-substring (beg end &optional _delete)
+  "Filter text between BEG and END, removing fake newlines.
+This is used as `filter-buffer-substring-function' in copy mode."
+  (let* ((text (buffer-substring beg end))
+         (start-line (line-number-at-pos beg)))
+    (emacs-alacritty--remove-fake-newlines text start-line)))
+
 (defun emacs-alacritty-copy-mode ()
   "Toggle copy mode.
 In copy mode, the terminal acts like a normal buffer for
-selecting and copying text."
+selecting and copying text.  Fake newlines (from line wrapping)
+are automatically removed when copying."
   (interactive)
   (setq emacs-alacritty--copy-mode (not emacs-alacritty--copy-mode))
   (if emacs-alacritty--copy-mode
       (progn
         (setq buffer-read-only t)
         (use-local-map emacs-alacritty-copy-mode-map)
+        ;; Set up filter for removing fake newlines
+        (setq-local filter-buffer-substring-function
+                    #'emacs-alacritty--filter-buffer-substring)
         (message "Copy mode enabled. Press 'q' to exit, RET to copy selection."))
     (use-local-map emacs-alacritty-mode-map)
+    ;; Restore default filter
+    (kill-local-variable 'filter-buffer-substring-function)
     (message "Copy mode disabled.")))
 
 (defun emacs-alacritty-copy-mode-done ()
-  "Exit copy mode, copying the selection if active."
+  "Exit copy mode, copying the selection if active.
+Fake newlines are automatically removed from the copied text."
   (interactive)
   (when (use-region-p)
-    (kill-ring-save (region-beginning) (region-end)))
+    (let* ((beg (region-beginning))
+           (end (region-end))
+           (start-line (line-number-at-pos beg))
+           (text (buffer-substring-no-properties beg end))
+           (filtered-text (emacs-alacritty--remove-fake-newlines text start-line)))
+      ;; Optionally exclude prompt
+      (when (and emacs-alacritty-copy-exclude-prompt
+                 emacs-alacritty--prompt-end
+                 (>= emacs-alacritty--prompt-end beg)
+                 (<= emacs-alacritty--prompt-end end))
+        ;; Adjust text to exclude prompt portion
+        (let ((prompt-offset (- emacs-alacritty--prompt-end beg)))
+          (when (> prompt-offset 0)
+            (setq filtered-text (substring filtered-text prompt-offset)))))
+      (kill-new filtered-text)))
   (deactivate-mark)
   (emacs-alacritty-copy-mode))
 

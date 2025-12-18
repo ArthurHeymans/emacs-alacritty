@@ -522,6 +522,24 @@ fn make_segment<'e>(
     Ok(result)
 }
 
+/// Check if a line wraps (has a fake newline at the end)
+/// Returns true if the line continues on the next line (i.e., should NOT have a real newline)
+#[defun]
+fn line_wraps(term: &AlacrittyTerm, line: i64) -> Result<bool> {
+    let term_lock = term.term.lock();
+    let grid = term_lock.grid();
+    let line_idx = line as i32;
+
+    if line_idx < 0 || line_idx >= grid.screen_lines() as i32 {
+        return Ok(false);
+    }
+
+    let row = &grid[Line(line_idx)];
+    // Check if the last column has the WRAPLINE flag
+    let last_col = grid.columns().saturating_sub(1);
+    Ok(row[Column(last_col)].flags.contains(CellFlags::WRAPLINE))
+}
+
 /// Get the cursor row (0-indexed)
 #[defun]
 fn cursor_row(term: &AlacrittyTerm) -> Result<i64> {
