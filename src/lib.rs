@@ -136,6 +136,8 @@ pub struct AlacrittyTerm {
     size: Mutex<TermSize>,
     title: Mutex<String>,
     exited: Mutex<bool>,
+    /// Dirty flag - set when terminal content has changed and needs redraw
+    dirty: Arc<Mutex<bool>>,
 }
 
 impl AlacrittyTerm {
@@ -207,6 +209,7 @@ impl AlacrittyTerm {
             size: Mutex::new(size),
             title: Mutex::new(String::new()),
             exited: Mutex::new(false),
+            dirty: Arc::new(Mutex::new(true)), // Start dirty to trigger initial render
         })
     }
 
@@ -234,11 +237,23 @@ impl AlacrittyTerm {
                 TermEvent::Exit => {
                     *self.exited.lock() = true;
                 }
+                TermEvent::Wakeup => {
+                    // Terminal content has changed, mark as dirty
+                    *self.dirty.lock() = true;
+                }
                 _ => {}
             }
             events.push(event);
         }
         events
+    }
+
+    fn is_dirty(&self) -> bool {
+        *self.dirty.lock()
+    }
+
+    fn clear_dirty(&self) {
+        *self.dirty.lock() = false;
     }
 
     fn get_content(&self) -> String {
@@ -556,6 +571,19 @@ fn cursor_col(term: &AlacrittyTerm) -> Result<i64> {
 #[defun]
 fn is_exited(term: &AlacrittyTerm) -> Result<bool> {
     Ok(term.is_exited())
+}
+
+/// Check if the terminal content has changed and needs redrawing
+#[defun]
+fn is_dirty(term: &AlacrittyTerm) -> Result<bool> {
+    Ok(term.is_dirty())
+}
+
+/// Clear the dirty flag after redrawing
+#[defun]
+fn clear_dirty(term: &AlacrittyTerm) -> Result<()> {
+    term.clear_dirty();
+    Ok(())
 }
 
 /// Get the terminal title (set by the shell/programs via escape sequences)

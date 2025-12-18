@@ -52,6 +52,8 @@
 (declare-function emacs-alacritty-paste "emacs-alacritty")
 (declare-function emacs-alacritty-line-wraps "emacs-alacritty")
 (declare-function emacs-alacritty-cursor-blink "emacs-alacritty")
+(declare-function emacs-alacritty-is-dirty "emacs-alacritty")
+(declare-function emacs-alacritty-clear-dirty "emacs-alacritty")
 
 ;; Load the dynamic module
 (defvar emacs-alacritty-module-path nil
@@ -366,7 +368,7 @@ Used for excluding prompts when copying.")
              (not emacs-alacritty--copy-mode))
     (condition-case err
         (let ((inhibit-read-only t))
-          ;; Process any pending events
+          ;; Process any pending events (this also updates the dirty flag)
           (emacs-alacritty--process-events)
           
           ;; Check if terminal has exited
@@ -374,42 +376,46 @@ Used for excluding prompts when copying.")
             (emacs-alacritty--handle-exit)
             (cl-return-from emacs-alacritty--refresh))
           
-          ;; Update display with styled content
-          (let* ((styled-lines (emacs-alacritty-get-styled-content emacs-alacritty--term))
-                 (cursor-row (emacs-alacritty-cursor-row emacs-alacritty--term))
-                 (cursor-col (emacs-alacritty-cursor-col emacs-alacritty--term))
-                 (line-num 0)
-                 (fake-newlines nil))
-            (erase-buffer)
-            ;; Insert styled content and track fake newlines
-            (dolist (line styled-lines)
-              (dolist (segment line)
-                (emacs-alacritty--insert-styled-segment segment))
-              ;; Check if this line wraps (has a fake newline)
-              (when (emacs-alacritty-line-wraps emacs-alacritty--term line-num)
-                (push (1+ line-num) fake-newlines))  ; Store 1-indexed line number
-              (insert "\n")
-              (setq line-num (1+ line-num)))
-            ;; Store fake newlines for copy mode
-            (setq emacs-alacritty--fake-newlines (nreverse fake-newlines))
-            ;; Position cursor
-            ;; The terminal cursor position is in terms of terminal columns (0-indexed).
-            ;; We need to translate this to buffer position accounting for character widths.
-            (goto-char (point-min))
-            (forward-line cursor-row)
-            (let ((line-end (line-end-position))
-                  (target-col cursor-col)
-                  (visual-col 0))
-              ;; Move forward character by character, tracking visual column
-              (while (and (< (point) line-end)
-                          (< visual-col target-col))
-                (let* ((c (char-after))
-                       (w (if c (char-width c) 1)))
-                  (setq visual-col (+ visual-col w))
-                  (forward-char 1)))
-              ;; If we overshot due to a wide char, stay where we are
-              ;; (cursor will be at the start of the wide char)
-              )))
+          ;; Only redraw if terminal content has changed
+          (when (emacs-alacritty-is-dirty emacs-alacritty--term)
+            ;; Clear dirty flag before redrawing
+            (emacs-alacritty-clear-dirty emacs-alacritty--term)
+            ;; Update display with styled content
+            (let* ((styled-lines (emacs-alacritty-get-styled-content emacs-alacritty--term))
+                   (cursor-row (emacs-alacritty-cursor-row emacs-alacritty--term))
+                   (cursor-col (emacs-alacritty-cursor-col emacs-alacritty--term))
+                   (line-num 0)
+                   (fake-newlines nil))
+              (erase-buffer)
+              ;; Insert styled content and track fake newlines
+              (dolist (line styled-lines)
+                (dolist (segment line)
+                  (emacs-alacritty--insert-styled-segment segment))
+                ;; Check if this line wraps (has a fake newline)
+                (when (emacs-alacritty-line-wraps emacs-alacritty--term line-num)
+                  (push (1+ line-num) fake-newlines))  ; Store 1-indexed line number
+                (insert "\n")
+                (setq line-num (1+ line-num)))
+              ;; Store fake newlines for copy mode
+              (setq emacs-alacritty--fake-newlines (nreverse fake-newlines))
+              ;; Position cursor
+              ;; The terminal cursor position is in terms of terminal columns (0-indexed).
+              ;; We need to translate this to buffer position accounting for character widths.
+              (goto-char (point-min))
+              (forward-line cursor-row)
+              (let ((line-end (line-end-position))
+                    (target-col cursor-col)
+                    (visual-col 0))
+                ;; Move forward character by character, tracking visual column
+                (while (and (< (point) line-end)
+                            (< visual-col target-col))
+                  (let* ((c (char-after))
+                         (w (if c (char-width c) 1)))
+                    (setq visual-col (+ visual-col w))
+                    (forward-char 1)))
+                ;; If we overshot due to a wide char, stay where we are
+                ;; (cursor will be at the start of the wide char)
+                ))))
       (error
        (message "emacs-alacritty refresh error: %s" (error-message-string err))))))
 
