@@ -34,6 +34,7 @@
 
 (require 'cl-lib)
 (require 'subr-x)
+(require 'tramp)
 
 ;; Load the dynamic module
 (defvar emacs-alacritty-module-path nil
@@ -76,6 +77,31 @@
 (defcustom emacs-alacritty-shell (or (getenv "SHELL") "/bin/sh")
   "Shell to run in the terminal."
   :type 'string
+  :group 'emacs-alacritty)
+
+(defcustom emacs-alacritty-tramp-shells
+  '(("ssh" login-shell)
+    ("scp" login-shell)
+    ("docker" "/bin/sh"))
+  "The shell that gets run in the terminal for tramp.
+
+`emacs-alacritty-tramp-shells' has to be a list of pairs of the format:
+\(TRAMP-METHOD SHELL)
+
+Use t as TRAMP-METHOD to specify a default shell for all methods.
+Specific methods always take precedence over t.
+
+Set SHELL to \\='login-shell to use the user's login shell on the host.
+The login-shell detection currently works for POSIX-compliant remote
+hosts that have the getent command (regular GNU/Linux distros, *BSDs,
+but not MacOS X unfortunately).
+
+You can specify an additional second SHELL command as a fallback
+that is used when the login-shell detection fails, e.g.,
+\\='((\"ssh\" login-shell \"/bin/bash\") ...)
+If no second SHELL command is specified with \\='login-shell, the terminal
+will fall back to tramp's shell."
+  :type '(alist :key-type string :value-type string)
   :group 'emacs-alacritty)
 
 (defcustom emacs-alacritty-max-scrollback 10000
@@ -418,11 +444,149 @@ Returns a local path or TRAMP path as appropriate."
     (if local-host-p
         ;; Local path
         (file-name-as-directory expanded-path)
-      ;; Remote path via TRAMP
+      ;; Remote path via TRAMP - use the default method (/-:)
+      ;; This allows TRAMP to automatically determine the method
       (let ((tramp-path (if user
-                            (format "/%s@%s:%s" user host expanded-path)
-                          (format "/%s:%s" host expanded-path))))
+                            (format "/-:%s@%s:%s" user host expanded-path)
+                          (format "/-:%s:%s" host expanded-path))))
         (file-name-as-directory tramp-path)))))
+
+(defun emacs-alacritty--tramp-get-shell (method)
+  "Get the shell for a remote location as specified in `emacs-alacritty-tramp-shells'.
+The argument METHOD is the method string (as used by tramp) to get the shell
+for, or t to get the default shell for all methods."
+  (let* ((specs (cdr (assoc method emacs-alacritty-tramp-shells)))
+         (first (car specs))
+         (second (cadr specs)))
+    ;; Allow '(... login-shell) or '(... 'login-shell).
+    (if (or (eq first 'login-shell)
+            (and (consp first) (eq (cadr first) 'login-shell)))
+        ;; If the first element is 'login-shell, try to determine the user's
+        ;; login shell on the remote host.  This should work for all
+        ;; POSIX-compliant systems with the getent command in PATH.  This
+        ;; includes regular GNU/Linux distros, *BSDs, but not MacOS X.  If
+        ;; the login-shell determination fails at any point, the second
+        ;; element in the shell spec is used (if present, otherwise nil is
+        ;; returned).
+        (let* ((entry (ignore-errors
+                        (with-output-to-string
+                          (with-current-buffer standard-output
+                            ;; The getent command returns the passwd entry
+                            ;; for the specified user independently of the
+                            ;; used name service (i.e., not only for static
+                            ;; passwd files, but also for LDAP, etc).
+                            ;;
+                            ;; Use a shell command here to get $LOGNAME.
+                            ;; Using the tramp user does not always work as
+                            ;; it can be nil, e.g., with ssh host configs.
+                            ;; $LOGNAME is defined in all POSIX-compliant
+                            ;; systems.
+                            (unless (= 0 (process-file-shell-command
+                                          "getent passwd $LOGNAME"
+                                          nil (current-buffer) nil))
+                              (error "Unexpected return value"))
+                            ;; If we have more than one line, the output is
+                            ;; not the expected single passwd entry.
+                            ;; Most likely, $LOGNAME is not set.
+                            (when (> (count-lines (point-min) (point-max)) 1)
+                              (error "Unexpected output"))))))
+               (shell (when entry
+                        ;; The returned Unix passwd entry is a colon-
+                        ;; separated line.  The 6th (last) element specifies
+                        ;; the user's shell.
+                        (nth 6 (split-string entry ":" nil "[ \t\n\r]+")))))
+          (or shell second))
+      first)))
+
+(defun emacs-alacritty--get-shell ()
+  "Get the shell that gets run in the terminal.
+For remote directories (via TRAMP), uses `emacs-alacritty-tramp-shells'
+to determine the appropriate shell."
+  (if (ignore-errors (file-remote-p default-directory))
+      (with-parsed-tramp-file-name default-directory nil
+        (or (emacs-alacritty--tramp-get-shell method)
+            (emacs-alacritty--tramp-get-shell t)
+            (with-connection-local-variables shell-file-name)
+            emacs-alacritty-shell))
+    emacs-alacritty-shell))
+
+(defun emacs-alacritty--quote-for-remote-shell (str)
+  "Quote STR for use in a remote shell command.
+Uses single quotes with proper escaping for embedded single quotes."
+  (concat "'" (replace-regexp-in-string "'" "'\\\\''" str) "'"))
+
+(defun emacs-alacritty--build-remote-command ()
+  "Build a command string to connect to a remote host via TRAMP.
+Returns a command that, when executed locally, will connect to the
+remote host and start a shell in the appropriate directory.
+Returns nil if `default-directory' is not a remote path."
+  (when (ignore-errors (file-remote-p default-directory))
+    (with-parsed-tramp-file-name default-directory nil
+      (let ((shell (emacs-alacritty--get-shell))
+            (remote-dir (or localname "~")))
+        (pcase method
+          ;; SSH-based methods
+          ((or "ssh" "scp" "scpx" "sshx" "rsync")
+           (let* ((port-option (if (and (boundp 'port) port)
+                                   (format "-p %s " port)
+                                 ""))
+                  (host-arg (if user (format "%s@%s" user host) host))
+                  ;; Build the remote command: cd to directory and exec shell
+                  ;; The whole command needs to be quoted for SSH
+                  (remote-cmd (format "cd %s && exec %s -l"
+                                      (emacs-alacritty--quote-for-remote-shell remote-dir)
+                                      shell)))
+             ;; Quote the remote command so && is passed to remote shell
+             (format "ssh %s-t %s %s"
+                     port-option
+                     host-arg
+                     (emacs-alacritty--quote-for-remote-shell remote-cmd))))
+          ;; Docker methods
+          ((or "docker" "podman")
+           (let ((container host)
+                 (exec-cmd (if (string= method "podman") "podman" "docker"))
+                 (remote-cmd (format "cd %s && exec %s"
+                                     (emacs-alacritty--quote-for-remote-shell remote-dir)
+                                     shell)))
+             (format "%s exec -it %s sh -c %s"
+                     exec-cmd
+                     container
+                     (emacs-alacritty--quote-for-remote-shell remote-cmd))))
+          ;; Kubernetes/kubectl
+          ("kubectl"
+           (let* ((pod host)
+                  (namespace (when (and (boundp 'hop) hop)
+                               (tramp-file-name-host
+                                (tramp-dissect-file-name hop))))
+                  (remote-cmd (format "cd %s && exec %s"
+                                      (emacs-alacritty--quote-for-remote-shell remote-dir)
+                                      shell)))
+             (format "kubectl exec -it %s%s -- sh -c %s"
+                     (if namespace (format "-n %s " namespace) "")
+                     pod
+                     (emacs-alacritty--quote-for-remote-shell remote-cmd))))
+          ;; Default: try SSH as fallback
+          (_
+           (let* ((host-arg (if user (format "%s@%s" user host) host))
+                  (remote-cmd (format "cd %s && exec %s -l"
+                                      (emacs-alacritty--quote-for-remote-shell remote-dir)
+                                      shell)))
+             (format "ssh -t %s %s"
+                     host-arg
+                     (emacs-alacritty--quote-for-remote-shell remote-cmd)))))))))
+
+(defun emacs-alacritty--get-command ()
+  "Get the command to run in the terminal.
+For remote directories, returns a command to connect to the remote host.
+For local directories, returns a command to cd to the directory and start the shell."
+  (or (emacs-alacritty--build-remote-command)
+      ;; Local directory - cd to it and exec the shell
+      (let ((dir (expand-file-name default-directory)))
+        (if (file-directory-p dir)
+            (format "cd %s && exec %s"
+                    (emacs-alacritty--quote-for-remote-shell dir)
+                    emacs-alacritty-shell)
+          emacs-alacritty-shell))))
 
 (defun emacs-alacritty--process-events ()
   "Process pending terminal events."
@@ -483,7 +647,10 @@ Returns a local path or TRAMP path as appropriate."
 
 ;;;###autoload
 (defun emacs-alacritty ()
-  "Create a new terminal buffer."
+  "Create a new terminal buffer.
+When `default-directory' is a TRAMP remote path, the terminal will
+connect to the remote host via SSH (or appropriate method) and start
+a shell there using `emacs-alacritty-tramp-shells'."
   (interactive)
   (emacs-alacritty--load-module)
   (let ((buffer (generate-new-buffer "*alacritty*")))
@@ -494,7 +661,8 @@ Returns a local path or TRAMP path as appropriate."
     (let ((size (emacs-alacritty--get-window-size)))
       (with-current-buffer buffer
         (setq emacs-alacritty--term
-              (emacs-alacritty-create (car size) (cdr size) emacs-alacritty-shell))
+              (emacs-alacritty-create (car size) (cdr size)
+                                      (emacs-alacritty--get-command)))
         ;; Start refresh timer
         (setq emacs-alacritty--timer
               (run-with-timer 0.1 emacs-alacritty-timer-interval
@@ -507,7 +675,10 @@ Returns a local path or TRAMP path as appropriate."
 
 ;;;###autoload
 (defun emacs-alacritty-other-window ()
-  "Create a new terminal buffer in another window."
+  "Create a new terminal buffer in another window.
+When `default-directory' is a TRAMP remote path, the terminal will
+connect to the remote host via SSH (or appropriate method) and start
+a shell there using `emacs-alacritty-tramp-shells'."
   (interactive)
   (emacs-alacritty--load-module)
   (let ((buffer (generate-new-buffer "*alacritty*")))
@@ -518,7 +689,8 @@ Returns a local path or TRAMP path as appropriate."
     (let ((size (emacs-alacritty--get-window-size)))
       (with-current-buffer buffer
         (setq emacs-alacritty--term
-              (emacs-alacritty-create (car size) (cdr size) emacs-alacritty-shell))
+              (emacs-alacritty-create (car size) (cdr size)
+                                      (emacs-alacritty--get-command)))
         ;; Start refresh timer
         (setq emacs-alacritty--timer
               (run-with-timer 0.1 emacs-alacritty-timer-interval

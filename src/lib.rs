@@ -144,11 +144,23 @@ impl AlacrittyTerm {
         let (event_tx, event_rx) = channel();
 
         // Setup PTY options
-        let shell_program = shell
+        // The shell parameter can be either:
+        // 1. A simple shell path like "/bin/bash"
+        // 2. A complex command like "ssh user@host -t 'cd /path && exec /bin/bash'"
+        // For complex commands (containing spaces), we wrap with /bin/sh -c
+        let shell_cmd = shell
             .unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()));
 
+        let (shell_program, shell_args) = if shell_cmd.contains(' ') {
+            // Complex command - wrap with sh -c
+            ("/bin/sh".to_string(), vec!["-c".to_string(), shell_cmd])
+        } else {
+            // Simple shell path
+            (shell_cmd, vec![])
+        };
+
         let pty_config = PtyOptions {
-            shell: Some(Shell::new(shell_program, vec![])),
+            shell: Some(Shell::new(shell_program, shell_args)),
             working_directory: None,
             ..Default::default()
         };
@@ -408,13 +420,13 @@ fn get_styled_content<'e>(env: &'e Env, term: &AlacrittyTerm) -> Result<Value<'e
 
         for col_idx in (0..grid.columns()).rev() {
             let cell = &row[Column(col_idx)];
-            
+
             // Skip wide character spacer cells - they're placeholders for the
             // second half of wide characters and shouldn't be rendered
             if cell.flags.contains(CellFlags::WIDE_CHAR_SPACER) {
                 continue;
             }
-            
+
             let c = if cell.c == '\0' { ' ' } else { cell.c };
 
             let fg = color_to_rgb(&cell.fg);
