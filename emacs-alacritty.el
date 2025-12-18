@@ -66,11 +66,28 @@
   "Whether the emacs-alacritty module has been loaded.")
 
 (defun emacs-alacritty--get-module-dir ()
-  "Get the directory containing the emacs-alacritty module."
-  (or (and load-file-name (file-name-directory load-file-name))
-      (and buffer-file-name (file-name-directory buffer-file-name))
-      (and (boundp 'emacs-alacritty-source-dir) emacs-alacritty-source-dir)
-      default-directory))
+  "Get the directory containing the emacs-alacritty source (with Cargo.toml).
+This handles package managers like straight.el that separate source and build directories."
+  ;; If user explicitly set emacs-alacritty-source-dir, use it
+  (if emacs-alacritty-source-dir
+      emacs-alacritty-source-dir
+    (let ((dir (or (and load-file-name (file-name-directory load-file-name))
+                   (and buffer-file-name (file-name-directory buffer-file-name))
+                   ;; Use locate-library as fallback (works with straight.el)
+                   (when-let ((lib (locate-library "emacs-alacritty.el" t)))
+                     (file-name-directory lib))
+                   default-directory)))
+      ;; Verify Cargo.toml exists, otherwise try to find source directory
+      (if (file-exists-p (expand-file-name "Cargo.toml" dir))
+          dir
+        ;; For straight.el: look in repos directory instead of build directory
+        (let ((repos-dir (replace-regexp-in-string
+                          "/straight/build\\(-[^/]+\\)?/emacs-alacritty/?$"
+                          "/straight/repos/emacs-alacritty/"
+                          dir)))
+          (if (file-exists-p (expand-file-name "Cargo.toml" repos-dir))
+              repos-dir
+            dir))))))
 
 (defun emacs-alacritty--find-module ()
   "Find the emacs-alacritty dynamic module.
@@ -110,6 +127,14 @@ If the module is not found, offers to compile it."
 
 ;; Module compilation options
 
+(defcustom emacs-alacritty-source-dir nil
+  "Directory containing the emacs-alacritty source code (with Cargo.toml).
+If nil, the directory is auto-detected.  Set this if auto-detection fails,
+for example when using package managers that separate source and build directories."
+  :type '(choice (const :tag "Auto-detect" nil)
+                 (directory :tag "Source directory"))
+  :group 'emacs-alacritty)
+
 (defcustom emacs-alacritty-always-compile-module nil
   "If non-nil, automatically compile the module without prompting.
 When nil, the user is prompted before compilation."
@@ -140,7 +165,7 @@ Example: \"--features some-feature\""
   (interactive)
   (unless (emacs-alacritty--cargo-is-available)
     (error "Cargo not found.  Please install Rust and Cargo first"))
-  (let* ((emacs-alacritty-directory (emacs-alacritty--get-module-dir))
+  (let* ((emacs-alacritty-directory (expand-file-name (emacs-alacritty--get-module-dir)))
          (cargo-args (concat
                       (if emacs-alacritty-compile-release "--release " "")
                       emacs-alacritty-cargo-args))
@@ -149,6 +174,9 @@ Example: \"--features some-feature\""
                   (shell-quote-argument emacs-alacritty-directory)
                   cargo-args))
          (buffer (get-buffer-create emacs-alacritty-install-buffer-name)))
+    ;; Verify Cargo.toml exists before attempting to build
+    (unless (file-exists-p (expand-file-name "Cargo.toml" emacs-alacritty-directory))
+      (error "Cargo.toml not found in %s.  Set `emacs-alacritty-source-dir' to the source directory" emacs-alacritty-directory))
     (pop-to-buffer buffer)
     (compilation-mode)
     (if (zerop (let ((inhibit-read-only t))
