@@ -1,12 +1,12 @@
-;;; emacs-alacritty.el --- Alacritty terminal emulator in Emacs -*- lexical-binding: t -*-
+;;; alacritty.el --- Alacritty terminal emulator in Emacs -*- lexical-binding: t -*-
 
 ;; Copyright (C) 2024 Free Software Foundation, Inc.
 
-;; Author: emacs-alacritty contributors
+;; Author: alacritty contributors
 ;; Version: 0.1.0
 ;; Package-Requires: ((emacs "25.1"))
 ;; Keywords: terminals
-;; URL: https://github.com/emacs-alacritty/emacs-alacritty
+;; URL: https://github.com/alacritty/alacritty.el
 
 ;; This file is part of GNU Emacs.
 
@@ -25,10 +25,9 @@
 
 ;;; Commentary:
 
-;; Emacs-alacritty is a terminal emulator for Emacs using the
+;; Alacritty is a terminal emulator for Emacs using the
 ;; alacritty_terminal library.  It provides a fully-featured terminal
-;; experience similar to emacs-libvterm but using Alacritty's
-;; terminal emulation.
+;; experience similar to vterm but using Alacritty's terminal emulation.
 
 ;;; Code:
 
@@ -38,43 +37,43 @@
 (require 'bookmark)
 
 ;; Declare functions provided by the dynamic module
-(declare-function emacs-alacritty-create "emacs-alacritty")
-(declare-function emacs-alacritty-resize "emacs-alacritty")
-(declare-function emacs-alacritty-write-input "emacs-alacritty")
-(declare-function emacs-alacritty-get-text "emacs-alacritty")
-(declare-function emacs-alacritty-get-styled-content "emacs-alacritty")
-(declare-function emacs-alacritty-cursor-row "emacs-alacritty")
-(declare-function emacs-alacritty-cursor-col "emacs-alacritty")
-(declare-function emacs-alacritty-is-exited "emacs-alacritty")
-(declare-function emacs-alacritty-get-title "emacs-alacritty")
-(declare-function emacs-alacritty-poll-events "emacs-alacritty")
-(declare-function emacs-alacritty-send-key "emacs-alacritty")
-(declare-function emacs-alacritty-send-char "emacs-alacritty")
-(declare-function emacs-alacritty-paste "emacs-alacritty")
-(declare-function emacs-alacritty-line-wraps "emacs-alacritty")
-(declare-function emacs-alacritty-cursor-blink "emacs-alacritty")
-(declare-function emacs-alacritty-is-dirty "emacs-alacritty")
-(declare-function emacs-alacritty-clear-dirty "emacs-alacritty")
-(declare-function emacs-alacritty-get-full-styled-content "emacs-alacritty")
-(declare-function emacs-alacritty-history-size "emacs-alacritty")
+(declare-function alacritty--module-create "alacritty")
+(declare-function alacritty--module-resize "alacritty")
+(declare-function alacritty--module-write-input "alacritty")
+(declare-function alacritty--module-get-text "alacritty")
+(declare-function alacritty--module-get-styled-content "alacritty")
+(declare-function alacritty--module-cursor-row "alacritty")
+(declare-function alacritty--module-cursor-col "alacritty")
+(declare-function alacritty--module-is-exited "alacritty")
+(declare-function alacritty--module-get-title "alacritty")
+(declare-function alacritty--module-poll-events "alacritty")
+(declare-function alacritty--module-send-key "alacritty")
+(declare-function alacritty--module-send-char "alacritty")
+(declare-function alacritty--module-paste "alacritty")
+(declare-function alacritty--module-line-wraps "alacritty")
+(declare-function alacritty--module-cursor-blink "alacritty")
+(declare-function alacritty--module-is-dirty "alacritty")
+(declare-function alacritty--module-clear-dirty "alacritty")
+(declare-function alacritty--module-get-full-styled-content "alacritty")
+(declare-function alacritty--module-history-size "alacritty")
 
 ;; Load the dynamic module
-(defvar emacs-alacritty-module-path nil
-  "Path to the emacs-alacritty dynamic module.")
+(defvar alacritty-module-path nil
+  "Path to the alacritty dynamic module.")
 
-(defvar emacs-alacritty-module-loaded nil
-  "Whether the emacs-alacritty module has been loaded.")
+(defvar alacritty-module-loaded nil
+  "Whether the alacritty module has been loaded.")
 
-(defun emacs-alacritty--get-module-dir ()
-  "Get the directory containing the emacs-alacritty source (with Cargo.toml).
+(defun alacritty--get-module-dir ()
+  "Get the directory containing the alacritty source (with Cargo.toml).
 This handles package managers like straight.el that separate source and build directories."
-  ;; If user explicitly set emacs-alacritty-source-dir, use it
-  (if emacs-alacritty-source-dir
-      emacs-alacritty-source-dir
+  ;; If user explicitly set alacritty-source-dir, use it
+  (if alacritty-source-dir
+      alacritty-source-dir
     (let ((dir (or (and load-file-name (file-name-directory load-file-name))
                    (and buffer-file-name (file-name-directory buffer-file-name))
                    ;; Use locate-library as fallback (works with straight.el)
-                   (when-let ((lib (locate-library "emacs-alacritty.el" t)))
+                   (when-let ((lib (locate-library "alacritty.el" t)))
                      (file-name-directory lib))
                    default-directory)))
       ;; Verify Cargo.toml exists, otherwise try to find source directory
@@ -82,120 +81,120 @@ This handles package managers like straight.el that separate source and build di
           dir
         ;; For straight.el: look in repos directory instead of build directory
         (let ((repos-dir (replace-regexp-in-string
-                          "/straight/build\\(-[^/]+\\)?/emacs-alacritty/?$"
-                          "/straight/repos/emacs-alacritty/"
+                          "/straight/build\\(-[^/]+\\)?/alacritty/?$"
+                          "/straight/repos/alacritty/"
                           dir)))
           (if (file-exists-p (expand-file-name "Cargo.toml" repos-dir))
               repos-dir
             dir))))))
 
-(defun emacs-alacritty--find-module ()
-  "Find the emacs-alacritty dynamic module.
+(defun alacritty--find-module ()
+  "Find the alacritty dynamic module.
 Returns the path to the module if found, or nil if not found."
-  (let* ((dir (emacs-alacritty--get-module-dir))
-         (release-path (expand-file-name "target/release/libemacs_alacritty.so" dir))
-         (debug-path (expand-file-name "target/debug/libemacs_alacritty.so" dir)))
+  (let* ((dir (alacritty--get-module-dir))
+         (release-path (expand-file-name "target/release/libalacritty_emacs.so" dir))
+         (debug-path (expand-file-name "target/debug/libalacritty_emacs.so" dir)))
     (cond
      ((file-exists-p release-path) release-path)
      ((file-exists-p debug-path) debug-path)
      (t nil))))
 
-(defun emacs-alacritty--load-module ()
-  "Load the emacs-alacritty dynamic module.
+(defun alacritty--load-module ()
+  "Load the alacritty dynamic module.
 If the module is not found, offers to compile it."
-  (unless emacs-alacritty-module-loaded
-    (let ((module-path (or emacs-alacritty-module-path
-                           (emacs-alacritty--find-module))))
+  (unless alacritty-module-loaded
+    (let ((module-path (or alacritty-module-path
+                           (alacritty--find-module))))
       (unless module-path
         ;; Module not found, offer to compile
-        (if (or emacs-alacritty-always-compile-module
-                (y-or-n-p "emacs-alacritty module not found.  Compile it now? "))
+        (if (or alacritty-always-compile-module
+                (y-or-n-p "alacritty module not found.  Compile it now? "))
             (progn
-              (emacs-alacritty-module-compile)
-              (setq module-path (emacs-alacritty--find-module))
+              (alacritty-module-compile)
+              (setq module-path (alacritty--find-module))
               (unless module-path
                 (error "Compilation succeeded but module still not found")))
-          (error "emacs-alacritty will not work until the module is compiled")))
+          (error "alacritty will not work until the module is compiled")))
       (module-load module-path)
-      (setq emacs-alacritty-module-loaded t))))
+      (setq alacritty-module-loaded t))))
 
 ;; Customization
 
-(defgroup emacs-alacritty nil
+(defgroup alacritty nil
   "Alacritty terminal emulator for Emacs."
   :group 'terminals)
 
 ;; Module compilation options
 
-(defcustom emacs-alacritty-source-dir nil
-  "Directory containing the emacs-alacritty source code (with Cargo.toml).
+(defcustom alacritty-source-dir nil
+  "Directory containing the alacritty source code (with Cargo.toml).
 If nil, the directory is auto-detected.  Set this if auto-detection fails,
 for example when using package managers that separate source and build directories."
   :type '(choice (const :tag "Auto-detect" nil)
                  (directory :tag "Source directory"))
-  :group 'emacs-alacritty)
+  :group 'alacritty)
 
-(defcustom emacs-alacritty-always-compile-module nil
+(defcustom alacritty-always-compile-module nil
   "If non-nil, automatically compile the module without prompting.
 When nil, the user is prompted before compilation."
   :type 'boolean
-  :group 'emacs-alacritty)
+  :group 'alacritty)
 
-(defcustom emacs-alacritty-compile-release t
+(defcustom alacritty-compile-release t
   "If non-nil, compile in release mode (optimized).
 If nil, compile in debug mode (faster compilation, slower runtime)."
   :type 'boolean
-  :group 'emacs-alacritty)
+  :group 'alacritty)
 
-(defcustom emacs-alacritty-cargo-args ""
+(defcustom alacritty-cargo-args ""
   "Additional arguments to pass to cargo when building the module.
 Example: \"--features some-feature\""
   :type 'string
-  :group 'emacs-alacritty)
+  :group 'alacritty)
 
-(defvar emacs-alacritty-install-buffer-name " *Install emacs-alacritty* "
-  "Name of the buffer used for compiling emacs-alacritty.")
+(defvar alacritty-install-buffer-name " *Install alacritty* "
+  "Name of the buffer used for compiling alacritty.")
 
-(defun emacs-alacritty--cargo-is-available ()
+(defun alacritty--cargo-is-available ()
   "Check if cargo is available in PATH."
   (executable-find "cargo"))
 
-(defun emacs-alacritty-module-compile ()
-  "Compile the emacs-alacritty module using cargo."
+(defun alacritty-module-compile ()
+  "Compile the alacritty module using cargo."
   (interactive)
-  (unless (emacs-alacritty--cargo-is-available)
+  (unless (alacritty--cargo-is-available)
     (error "Cargo not found.  Please install Rust and Cargo first"))
-  (let* ((emacs-alacritty-directory (expand-file-name (emacs-alacritty--get-module-dir)))
+  (let* ((alacritty-directory (expand-file-name (alacritty--get-module-dir)))
          (cargo-args (concat
-                      (if emacs-alacritty-compile-release "--release " "")
-                      emacs-alacritty-cargo-args))
+                      (if alacritty-compile-release "--release " "")
+                      alacritty-cargo-args))
          (make-commands
           (format "cd %s && cargo build %s"
-                  (shell-quote-argument emacs-alacritty-directory)
+                  (shell-quote-argument alacritty-directory)
                   cargo-args))
-         (buffer (get-buffer-create emacs-alacritty-install-buffer-name)))
+         (buffer (get-buffer-create alacritty-install-buffer-name)))
     ;; Verify Cargo.toml exists before attempting to build
-    (unless (file-exists-p (expand-file-name "Cargo.toml" emacs-alacritty-directory))
-      (error "Cargo.toml not found in %s.  Set `emacs-alacritty-source-dir' to the source directory" emacs-alacritty-directory))
+    (unless (file-exists-p (expand-file-name "Cargo.toml" alacritty-directory))
+      (error "Cargo.toml not found in %s.  Set `alacritty-source-dir' to the source directory" alacritty-directory))
     (pop-to-buffer buffer)
     (compilation-mode)
     (if (zerop (let ((inhibit-read-only t))
                  (call-process "sh" nil buffer t "-c" make-commands)))
-        (message "Compilation of `emacs-alacritty' module succeeded")
-      (error "Compilation of `emacs-alacritty' module failed!"))))
+        (message "Compilation of `alacritty' module succeeded")
+      (error "Compilation of `alacritty' module failed!"))))
 
-(defcustom emacs-alacritty-shell (or (getenv "SHELL") "/bin/sh")
+(defcustom alacritty-shell (or (getenv "SHELL") "/bin/sh")
   "Shell to run in the terminal."
   :type 'string
-  :group 'emacs-alacritty)
+  :group 'alacritty)
 
-(defcustom emacs-alacritty-tramp-shells
+(defcustom alacritty-tramp-shells
   '(("ssh" login-shell)
     ("scp" login-shell)
     ("docker" "/bin/sh"))
   "The shell that gets run in the terminal for tramp.
 
-`emacs-alacritty-tramp-shells' has to be a list of pairs of the format:
+`alacritty-tramp-shells' has to be a list of pairs of the format:
 \(TRAMP-METHOD SHELL)
 
 Use t as TRAMP-METHOD to specify a default shell for all methods.
@@ -212,73 +211,73 @@ that is used when the login-shell detection fails, e.g.,
 If no second SHELL command is specified with \\='login-shell, the terminal
 will fall back to tramp's shell."
   :type '(alist :key-type string :value-type string)
-  :group 'emacs-alacritty)
+  :group 'alacritty)
 
-(defcustom emacs-alacritty-max-scrollback 10000
+(defcustom alacritty-max-scrollback 10000
   "Maximum number of scrollback lines."
   :type 'integer
-  :group 'emacs-alacritty)
+  :group 'alacritty)
 
-(defcustom emacs-alacritty-kill-buffer-on-exit t
+(defcustom alacritty-kill-buffer-on-exit t
   "Kill the buffer when the terminal process exits."
   :type 'boolean
-  :group 'emacs-alacritty)
+  :group 'alacritty)
 
-(defcustom emacs-alacritty-timer-interval 0.05
+(defcustom alacritty-timer-interval 0.05
   "Interval in seconds for the refresh timer."
   :type 'number
-  :group 'emacs-alacritty)
+  :group 'alacritty)
 
-(defcustom emacs-alacritty-clear-scrollback-when-clearing nil
+(defcustom alacritty-clear-scrollback-when-clearing nil
   "Clear scrollback when the screen is cleared."
   :type 'boolean
-  :group 'emacs-alacritty)
+  :group 'alacritty)
 
-(defcustom emacs-alacritty-buffer-name-string "alacritty %s"
+(defcustom alacritty-buffer-name-string "alacritty %s"
   "Format string for buffer names.  %s is replaced with the title."
   :type 'string
-  :group 'emacs-alacritty)
+  :group 'alacritty)
 
-(defcustom emacs-alacritty-copy-exclude-prompt nil
+(defcustom alacritty-copy-exclude-prompt nil
   "When non-nil, exclude the prompt from copied lines in copy mode.
 This uses prompt tracking to identify prompt regions."
   :type 'boolean
-  :group 'emacs-alacritty)
+  :group 'alacritty)
 
-(defcustom emacs-alacritty-copy-mode-remove-fake-newlines t
+(defcustom alacritty-copy-mode-remove-fake-newlines t
   "When non-nil, remove fake newlines when copying text in copy mode.
 Fake newlines are inserted by the terminal when a line wraps due to
 the terminal width. Removing them produces cleaner output."
   :type 'boolean
-  :group 'emacs-alacritty)
+  :group 'alacritty)
 
-(defcustom emacs-alacritty-eval-cmds
+(defcustom alacritty-eval-cmds
   '(("find-file" find-file)
     ("message" message)
-    ("vterm-clear-scrollback" emacs-alacritty-clear-scrollback))
+    ("vterm-clear-scrollback" alacritty-clear-scrollback))
   "List of commands that can be executed from the terminal.
 Each entry is (NAME FUNCTION) where NAME is the command name
 received from the terminal and FUNCTION is the Emacs function to call."
   :type '(repeat (list string function))
-  :group 'emacs-alacritty)
+  :group 'alacritty)
 
-(defcustom emacs-alacritty-ignore-blink-cursor t
+(defcustom alacritty-ignore-blink-cursor t
   "When t, ignore requests from applications to turn on/off cursor blink.
 
 If nil, cursor in any window may begin to blink or not blink because
 `blink-cursor-mode' is a global minor mode in Emacs.
 You can use `M-x blink-cursor-mode' to toggle manually."
   :type 'boolean
-  :group 'emacs-alacritty)
+  :group 'alacritty)
 
-(defcustom emacs-alacritty-bookmark-check-dir t
+(defcustom alacritty-bookmark-check-dir t
   "When non-nil, restore directory when restoring a bookmark."
   :type 'boolean
-  :group 'emacs-alacritty)
+  :group 'alacritty)
 
-(defcustom emacs-alacritty-exit-functions nil
+(defcustom alacritty-exit-functions nil
   "List of functions called when the terminal process exits.
-Each function is called with two arguments: the emacs-alacritty
+Each function is called with two arguments: the alacritty
 buffer of the process (if still live), and a string describing
 the exit event.
 
@@ -286,168 +285,168 @@ This can be used to perform cleanup, log exit events, or customize
 behavior when terminals close.
 
 Example:
-  (add-hook \\='emacs-alacritty-exit-functions
+  (add-hook \\='alacritty-exit-functions
             (lambda (buffer event)
               (message \"Terminal %s exited: %s\"
                        (if buffer (buffer-name buffer) \"<killed>\")
                        event)))"
   :type 'hook
-  :group 'emacs-alacritty)
+  :group 'alacritty)
 
 ;; Faces for terminal colors
 
-(defface emacs-alacritty-color-black
+(defface alacritty-color-black
   '((t :foreground "black" :background "black"))
   "Face for black color."
-  :group 'emacs-alacritty)
+  :group 'alacritty)
 
-(defface emacs-alacritty-color-red
+(defface alacritty-color-red
   '((t :foreground "red3" :background "red3"))
   "Face for red color."
-  :group 'emacs-alacritty)
+  :group 'alacritty)
 
-(defface emacs-alacritty-color-green
+(defface alacritty-color-green
   '((t :foreground "green3" :background "green3"))
   "Face for green color."
-  :group 'emacs-alacritty)
+  :group 'alacritty)
 
-(defface emacs-alacritty-color-yellow
+(defface alacritty-color-yellow
   '((t :foreground "yellow3" :background "yellow3"))
   "Face for yellow color."
-  :group 'emacs-alacritty)
+  :group 'alacritty)
 
-(defface emacs-alacritty-color-blue
+(defface alacritty-color-blue
   '((t :foreground "blue2" :background "blue2"))
   "Face for blue color."
-  :group 'emacs-alacritty)
+  :group 'alacritty)
 
-(defface emacs-alacritty-color-magenta
+(defface alacritty-color-magenta
   '((t :foreground "magenta3" :background "magenta3"))
   "Face for magenta color."
-  :group 'emacs-alacritty)
+  :group 'alacritty)
 
-(defface emacs-alacritty-color-cyan
+(defface alacritty-color-cyan
   '((t :foreground "cyan3" :background "cyan3"))
   "Face for cyan color."
-  :group 'emacs-alacritty)
+  :group 'alacritty)
 
-(defface emacs-alacritty-color-white
+(defface alacritty-color-white
   '((t :foreground "white" :background "white"))
   "Face for white color."
-  :group 'emacs-alacritty)
+  :group 'alacritty)
 
 ;; Buffer-local variables
 
-(defvar-local emacs-alacritty--term nil
+(defvar-local alacritty--term nil
   "The terminal instance for this buffer.")
 
-(defvar-local emacs-alacritty--timer nil
+(defvar-local alacritty--timer nil
   "Timer for refreshing the terminal display.")
 
-(defvar-local emacs-alacritty--title ""
+(defvar-local alacritty--title ""
   "Current terminal title.")
 
-(defvar-local emacs-alacritty--directory-from-title nil
+(defvar-local alacritty--directory-from-title nil
   "Whether directory was set from title (for tracking purposes).")
 
-(defvar-local emacs-alacritty--copy-mode nil
+(defvar-local alacritty--copy-mode nil
   "Whether copy mode is enabled.")
 
-(defvar-local emacs-alacritty--fake-newlines nil
+(defvar-local alacritty--fake-newlines nil
   "List of line numbers (1-indexed) that have fake newlines.
 These are lines that wrap due to terminal width rather than having
 actual newline characters.")
 
-(defvar-local emacs-alacritty--prompt-end nil
+(defvar-local alacritty--prompt-end nil
   "Buffer position of the end of the last prompt.
 Used for excluding prompts when copying.")
 
 ;; Mode map
 
-(defvar emacs-alacritty-mode-map
+(defvar alacritty-mode-map
   (let ((map (make-sparse-keymap)))
     ;; Basic key handling - most keys are sent to terminal
-    (define-key map [remap self-insert-command] #'emacs-alacritty--self-insert)
+    (define-key map [remap self-insert-command] #'alacritty--self-insert)
     
     ;; Special keys
-    (define-key map (kbd "RET") #'emacs-alacritty-send-return)
-    (define-key map (kbd "TAB") #'emacs-alacritty-send-tab)
-    (define-key map (kbd "DEL") #'emacs-alacritty-send-backspace)
-    (define-key map (kbd "<backspace>") #'emacs-alacritty-send-backspace)
-    (define-key map (kbd "<delete>") #'emacs-alacritty-send-delete)
-    (define-key map (kbd "<escape>") #'emacs-alacritty-send-escape)
+    (define-key map (kbd "RET") #'alacritty-send-return)
+    (define-key map (kbd "TAB") #'alacritty-send-tab)
+    (define-key map (kbd "DEL") #'alacritty-send-backspace)
+    (define-key map (kbd "<backspace>") #'alacritty-send-backspace)
+    (define-key map (kbd "<delete>") #'alacritty-send-delete)
+    (define-key map (kbd "<escape>") #'alacritty-send-escape)
     
     ;; Arrow keys
-    (define-key map (kbd "<up>") #'emacs-alacritty-send-up)
-    (define-key map (kbd "<down>") #'emacs-alacritty-send-down)
-    (define-key map (kbd "<left>") #'emacs-alacritty-send-left)
-    (define-key map (kbd "<right>") #'emacs-alacritty-send-right)
+    (define-key map (kbd "<up>") #'alacritty-send-up)
+    (define-key map (kbd "<down>") #'alacritty-send-down)
+    (define-key map (kbd "<left>") #'alacritty-send-left)
+    (define-key map (kbd "<right>") #'alacritty-send-right)
     
     ;; Navigation keys
-    (define-key map (kbd "<home>") #'emacs-alacritty-send-home)
-    (define-key map (kbd "<end>") #'emacs-alacritty-send-end)
-    (define-key map (kbd "<prior>") #'emacs-alacritty-send-page-up)
-    (define-key map (kbd "<next>") #'emacs-alacritty-send-page-down)
-    (define-key map (kbd "<insert>") #'emacs-alacritty-send-insert)
+    (define-key map (kbd "<home>") #'alacritty-send-home)
+    (define-key map (kbd "<end>") #'alacritty-send-end)
+    (define-key map (kbd "<prior>") #'alacritty-send-page-up)
+    (define-key map (kbd "<next>") #'alacritty-send-page-down)
+    (define-key map (kbd "<insert>") #'alacritty-send-insert)
     
     ;; Function keys
-    (define-key map (kbd "<f1>") (lambda () (interactive) (emacs-alacritty--send-key "f1")))
-    (define-key map (kbd "<f2>") (lambda () (interactive) (emacs-alacritty--send-key "f2")))
-    (define-key map (kbd "<f3>") (lambda () (interactive) (emacs-alacritty--send-key "f3")))
-    (define-key map (kbd "<f4>") (lambda () (interactive) (emacs-alacritty--send-key "f4")))
-    (define-key map (kbd "<f5>") (lambda () (interactive) (emacs-alacritty--send-key "f5")))
-    (define-key map (kbd "<f6>") (lambda () (interactive) (emacs-alacritty--send-key "f6")))
-    (define-key map (kbd "<f7>") (lambda () (interactive) (emacs-alacritty--send-key "f7")))
-    (define-key map (kbd "<f8>") (lambda () (interactive) (emacs-alacritty--send-key "f8")))
-    (define-key map (kbd "<f9>") (lambda () (interactive) (emacs-alacritty--send-key "f9")))
-    (define-key map (kbd "<f10>") (lambda () (interactive) (emacs-alacritty--send-key "f10")))
-    (define-key map (kbd "<f11>") (lambda () (interactive) (emacs-alacritty--send-key "f11")))
-    (define-key map (kbd "<f12>") (lambda () (interactive) (emacs-alacritty--send-key "f12")))
+    (define-key map (kbd "<f1>") (lambda () (interactive) (alacritty--send-key "f1")))
+    (define-key map (kbd "<f2>") (lambda () (interactive) (alacritty--send-key "f2")))
+    (define-key map (kbd "<f3>") (lambda () (interactive) (alacritty--send-key "f3")))
+    (define-key map (kbd "<f4>") (lambda () (interactive) (alacritty--send-key "f4")))
+    (define-key map (kbd "<f5>") (lambda () (interactive) (alacritty--send-key "f5")))
+    (define-key map (kbd "<f6>") (lambda () (interactive) (alacritty--send-key "f6")))
+    (define-key map (kbd "<f7>") (lambda () (interactive) (alacritty--send-key "f7")))
+    (define-key map (kbd "<f8>") (lambda () (interactive) (alacritty--send-key "f8")))
+    (define-key map (kbd "<f9>") (lambda () (interactive) (alacritty--send-key "f9")))
+    (define-key map (kbd "<f10>") (lambda () (interactive) (alacritty--send-key "f10")))
+    (define-key map (kbd "<f11>") (lambda () (interactive) (alacritty--send-key "f11")))
+    (define-key map (kbd "<f12>") (lambda () (interactive) (alacritty--send-key "f12")))
     
     ;; Control keys
-    (define-key map (kbd "C-a") (lambda () (interactive) (emacs-alacritty--send-char ?a "C")))
-    (define-key map (kbd "C-b") (lambda () (interactive) (emacs-alacritty--send-char ?b "C")))
-    (define-key map (kbd "C-c C-c") (lambda () (interactive) (emacs-alacritty--send-char ?c "C")))
-    (define-key map (kbd "C-d") (lambda () (interactive) (emacs-alacritty--send-char ?d "C")))
-    (define-key map (kbd "C-e") (lambda () (interactive) (emacs-alacritty--send-char ?e "C")))
-    (define-key map (kbd "C-f") (lambda () (interactive) (emacs-alacritty--send-char ?f "C")))
-    (define-key map (kbd "C-g") (lambda () (interactive) (emacs-alacritty--send-char ?g "C")))
-    (define-key map (kbd "C-k") (lambda () (interactive) (emacs-alacritty--send-char ?k "C")))
-    (define-key map (kbd "C-l") (lambda () (interactive) (emacs-alacritty--send-char ?l "C")))
-    (define-key map (kbd "C-n") (lambda () (interactive) (emacs-alacritty--send-char ?n "C")))
-    (define-key map (kbd "C-p") (lambda () (interactive) (emacs-alacritty--send-char ?p "C")))
-    (define-key map (kbd "C-r") (lambda () (interactive) (emacs-alacritty--send-char ?r "C")))
-    (define-key map (kbd "C-t") (lambda () (interactive) (emacs-alacritty--send-char ?t "C")))
-    (define-key map (kbd "C-u") (lambda () (interactive) (emacs-alacritty--send-char ?u "C")))
-    (define-key map (kbd "C-w") (lambda () (interactive) (emacs-alacritty--send-char ?w "C")))
-    (define-key map (kbd "C-y") #'emacs-alacritty-yank)
-    (define-key map (kbd "M-y") #'emacs-alacritty-yank-pop)
-    (define-key map (kbd "C-z") (lambda () (interactive) (emacs-alacritty--send-char ?z "C")))
-    (define-key map [mouse-2] #'emacs-alacritty-yank-primary)
-    (define-key map [remap mouse-yank-primary] #'emacs-alacritty-yank-primary)
+    (define-key map (kbd "C-a") (lambda () (interactive) (alacritty--send-char ?a "C")))
+    (define-key map (kbd "C-b") (lambda () (interactive) (alacritty--send-char ?b "C")))
+    (define-key map (kbd "C-c C-c") (lambda () (interactive) (alacritty--send-char ?c "C")))
+    (define-key map (kbd "C-d") (lambda () (interactive) (alacritty--send-char ?d "C")))
+    (define-key map (kbd "C-e") (lambda () (interactive) (alacritty--send-char ?e "C")))
+    (define-key map (kbd "C-f") (lambda () (interactive) (alacritty--send-char ?f "C")))
+    (define-key map (kbd "C-g") (lambda () (interactive) (alacritty--send-char ?g "C")))
+    (define-key map (kbd "C-k") (lambda () (interactive) (alacritty--send-char ?k "C")))
+    (define-key map (kbd "C-l") (lambda () (interactive) (alacritty--send-char ?l "C")))
+    (define-key map (kbd "C-n") (lambda () (interactive) (alacritty--send-char ?n "C")))
+    (define-key map (kbd "C-p") (lambda () (interactive) (alacritty--send-char ?p "C")))
+    (define-key map (kbd "C-r") (lambda () (interactive) (alacritty--send-char ?r "C")))
+    (define-key map (kbd "C-t") (lambda () (interactive) (alacritty--send-char ?t "C")))
+    (define-key map (kbd "C-u") (lambda () (interactive) (alacritty--send-char ?u "C")))
+    (define-key map (kbd "C-w") (lambda () (interactive) (alacritty--send-char ?w "C")))
+    (define-key map (kbd "C-y") #'alacritty-yank)
+    (define-key map (kbd "M-y") #'alacritty-yank-pop)
+    (define-key map (kbd "C-z") (lambda () (interactive) (alacritty--send-char ?z "C")))
+    (define-key map [mouse-2] #'alacritty-yank-primary)
+    (define-key map [remap mouse-yank-primary] #'alacritty-yank-primary)
     
     ;; Emacs-specific commands
-    (define-key map (kbd "C-c C-t") #'emacs-alacritty-copy-mode)
-    (define-key map (kbd "C-c C-l") #'emacs-alacritty-clear-scrollback)
-    (define-key map (kbd "C-c C-q") #'emacs-alacritty-send-next-key)
+    (define-key map (kbd "C-c C-t") #'alacritty-copy-mode)
+    (define-key map (kbd "C-c C-l") #'alacritty-clear-scrollback)
+    (define-key map (kbd "C-c C-q") #'alacritty-send-next-key)
     
     map)
-  "Keymap for `emacs-alacritty-mode'.")
+  "Keymap for `alacritty-mode'.")
 
 ;; Note: Meta key bindings (M-b, M-f, etc.) are not defined by default
 ;; because they can conflict with general.el and other packages that
 ;; manipulate keymaps. Users can add them manually if needed:
 ;;
-;; (define-key emacs-alacritty-mode-map (kbd "M-b")
-;;   (lambda () (interactive) (emacs-alacritty--send-char ?b "M")))
+;; (define-key alacritty-mode-map (kbd "M-b")
+;;   (lambda () (interactive) (alacritty--send-char ?b "M")))
 ;;
 ;; Or use C-c C-q (send-next-key) to send any key directly to the terminal.
 
-(defvar emacs-alacritty-copy-mode-map
+(defvar alacritty-copy-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "q") #'emacs-alacritty-copy-mode)
-    (define-key map (kbd "RET") #'emacs-alacritty-copy-mode-done)
-    (define-key map (kbd "C-c C-t") #'emacs-alacritty-copy-mode)
+    (define-key map (kbd "q") #'alacritty-copy-mode)
+    (define-key map (kbd "RET") #'alacritty-copy-mode-done)
+    (define-key map (kbd "C-c C-t") #'alacritty-copy-mode)
     ;; Navigation keys for scrolling through buffer
     (define-key map (kbd "<prior>") #'scroll-down-command)
     (define-key map (kbd "<next>") #'scroll-up-command)
@@ -473,71 +472,71 @@ Used for excluding prompts when copying.")
     ;; Selection
     (define-key map (kbd "C-SPC") #'set-mark-command)
     map)
-  "Keymap for `emacs-alacritty-copy-mode'.")
+  "Keymap for `alacritty-copy-mode'.")
 
 ;; Internal functions
 
-(defun emacs-alacritty--send-key (key &optional modifiers)
+(defun alacritty--send-key (key &optional modifiers)
   "Send KEY with optional MODIFIERS to the terminal."
-  (when (and emacs-alacritty--term (not emacs-alacritty--copy-mode))
-    (emacs-alacritty-send-key emacs-alacritty--term key modifiers)))
+  (when (and alacritty--term (not alacritty--copy-mode))
+    (alacritty--module-send-key alacritty--term key modifiers)))
 
-(defun emacs-alacritty--send-char (char &optional modifiers)
+(defun alacritty--send-char (char &optional modifiers)
   "Send CHAR with optional MODIFIERS to the terminal."
-  (when (and emacs-alacritty--term (not emacs-alacritty--copy-mode))
-    (emacs-alacritty-send-char emacs-alacritty--term char modifiers)))
+  (when (and alacritty--term (not alacritty--copy-mode))
+    (alacritty--module-send-char alacritty--term char modifiers)))
 
-(defun emacs-alacritty--self-insert ()
+(defun alacritty--self-insert ()
   "Send the last input character to the terminal."
   (interactive)
-  (when (and emacs-alacritty--term (not emacs-alacritty--copy-mode))
+  (when (and alacritty--term (not alacritty--copy-mode))
     (let ((char last-command-event))
       (when (characterp char)
-        (emacs-alacritty-write-input emacs-alacritty--term (char-to-string char))))))
+        (alacritty--module-write-input alacritty--term (char-to-string char))))))
 
-(defun emacs-alacritty--get-window-size ()
+(defun alacritty--get-window-size ()
   "Get the current window size in columns and lines."
   (cons (window-body-width) (window-body-height)))
 
-(defun emacs-alacritty--refresh ()
+(defun alacritty--refresh ()
   "Refresh the terminal display."
-  (when (and emacs-alacritty--term
+  (when (and alacritty--term
              (buffer-live-p (current-buffer))
-             (not emacs-alacritty--copy-mode))
+             (not alacritty--copy-mode))
     (condition-case err
         (let ((inhibit-read-only t))
           ;; Process any pending events (this also updates the dirty flag)
-          (emacs-alacritty--process-events)
+          (alacritty--process-events)
           
           ;; Check if term is still valid (may have been cleared by exit event)
-          (when emacs-alacritty--term
+          (when alacritty--term
             ;; Check if terminal has exited (in case exit wasn't delivered as event)
-            (if (emacs-alacritty-is-exited emacs-alacritty--term)
-                (emacs-alacritty--handle-exit)
+            (if (alacritty--module-is-exited alacritty--term)
+                (alacritty--handle-exit)
               ;; Only redraw if terminal content has changed
-              (when (emacs-alacritty-is-dirty emacs-alacritty--term)
+              (when (alacritty--module-is-dirty alacritty--term)
                 ;; Clear dirty flag before redrawing
-                (emacs-alacritty-clear-dirty emacs-alacritty--term)
+                (alacritty--module-clear-dirty alacritty--term)
                 ;; Update display with full styled content (including scrollback)
-                (let* ((styled-lines (emacs-alacritty-get-full-styled-content emacs-alacritty--term))
-                       (history-size (emacs-alacritty-history-size emacs-alacritty--term))
-                       (cursor-row (emacs-alacritty-cursor-row emacs-alacritty--term))
-                       (cursor-col (emacs-alacritty-cursor-col emacs-alacritty--term))
+                (let* ((styled-lines (alacritty--module-get-full-styled-content alacritty--term))
+                       (history-size (alacritty--module-history-size alacritty--term))
+                       (cursor-row (alacritty--module-cursor-row alacritty--term))
+                       (cursor-col (alacritty--module-cursor-col alacritty--term))
                        (line-num 0)
                        (fake-newlines nil))
                   (erase-buffer)
                   ;; Insert styled content and track fake newlines
                   (dolist (line styled-lines)
                     (dolist (segment line)
-                      (emacs-alacritty--insert-styled-segment segment))
+                      (alacritty--insert-styled-segment segment))
                     ;; Check if this line wraps (has a fake newline)
                     ;; line-num is 0-indexed from start of buffer (including scrollback)
-                    (when (emacs-alacritty-line-wraps emacs-alacritty--term line-num)
+                    (when (alacritty--module-line-wraps alacritty--term line-num)
                       (push (1+ line-num) fake-newlines))  ; Store 1-indexed line number
                     (insert "\n")
                     (setq line-num (1+ line-num)))
                   ;; Store fake newlines for copy mode
-                  (setq emacs-alacritty--fake-newlines (nreverse fake-newlines))
+                  (setq alacritty--fake-newlines (nreverse fake-newlines))
                   ;; Position cursor
                   ;; The terminal cursor position is relative to the visible screen (0-indexed).
                   ;; In our buffer, visible lines start at history-size (0-indexed).
@@ -558,21 +557,21 @@ Used for excluding prompts when copying.")
                   (let ((win-height (window-body-height)))
                     (recenter (min cursor-row (1- win-height)))))))))
       (error
-       (message "emacs-alacritty refresh error: %s" (error-message-string err))))))
+       (message "alacritty refresh error: %s" (error-message-string err))))))
 
-(defcustom emacs-alacritty-default-bg "#000000"
+(defcustom alacritty-default-bg "#000000"
   "Default terminal background color.
 This color will not be applied, allowing Emacs default background to show through."
   :type 'string
-  :group 'emacs-alacritty)
+  :group 'alacritty)
 
-(defcustom emacs-alacritty-default-fg "#e5e5e5"
+(defcustom alacritty-default-fg "#e5e5e5"
   "Default terminal foreground color.
 This color will not be applied, using Emacs default foreground instead."
   :type 'string
-  :group 'emacs-alacritty)
+  :group 'alacritty)
 
-(defun emacs-alacritty--insert-styled-segment (segment)
+(defun alacritty--insert-styled-segment (segment)
   "Insert a styled SEGMENT into the buffer.
 SEGMENT is (text fg-color bg-color bold italic underline inverse)."
   (let* ((text (nth 0 segment))
@@ -590,10 +589,10 @@ SEGMENT is (text fg-color bg-color bold italic underline inverse)."
         (setq fg bg)
         (setq bg temp)))
     ;; Build face attributes - skip default colors to allow Emacs theme to show through
-    (when (and fg (not (string-equal-ignore-case fg emacs-alacritty-default-fg)))
+    (when (and fg (not (string-equal-ignore-case fg alacritty-default-fg)))
       (push :foreground face-attrs)
       (push fg face-attrs))
-    (when (and bg (not (string-equal-ignore-case bg emacs-alacritty-default-bg)))
+    (when (and bg (not (string-equal-ignore-case bg alacritty-default-bg)))
       (push :background face-attrs)
       (push bg face-attrs))
     (when bold
@@ -611,7 +610,7 @@ SEGMENT is (text fg-color bg-color bold italic underline inverse)."
     (when face-attrs
       (add-face-text-property start (point) (nreverse face-attrs)))))
 
-(defun emacs-alacritty--parse-title-for-directory (title)
+(defun alacritty--parse-title-for-directory (title)
   "Parse TITLE for directory information.
 Expected format: user@host:path or host:path.
 Returns (user host path) or nil if not parseable."
@@ -628,15 +627,15 @@ Returns (user host path) or nil if not parseable."
             (match-string 1 title)
             (match-string 2 title))))))
 
-(defun emacs-alacritty--set-directory (user host path)
+(defun alacritty--set-directory (user host path)
   "Set `default-directory' based on USER, HOST, and PATH.
 Handles TRAMP for remote hosts."
   (when path
-    (let ((dir (emacs-alacritty--get-directory-from-remote user host path)))
+    (let ((dir (alacritty--get-directory-from-remote user host path)))
       (when (and dir (file-directory-p dir))
         (setq default-directory dir)))))
 
-(defun emacs-alacritty--get-directory-from-remote (user host path)
+(defun alacritty--get-directory-from-remote (user host path)
   "Construct directory from USER, HOST, and PATH.
 Returns a local path or TRAMP path as appropriate."
   (let ((local-host-p (or (null host)
@@ -657,11 +656,11 @@ Returns a local path or TRAMP path as appropriate."
                           (format "/-:%s:%s" host expanded-path))))
         (file-name-as-directory tramp-path)))))
 
-(defun emacs-alacritty--tramp-get-shell (method)
-  "Get the shell for a remote location as specified in `emacs-alacritty-tramp-shells'.
+(defun alacritty--tramp-get-shell (method)
+  "Get the shell for a remote location as specified in `alacritty-tramp-shells'.
 The argument METHOD is the method string (as used by tramp) to get the shell
 for, or t to get the default shell for all methods."
-  (let* ((specs (cdr (assoc method emacs-alacritty-tramp-shells)))
+  (let* ((specs (cdr (assoc method alacritty-tramp-shells)))
          (first (car specs))
          (second (cadr specs)))
     ;; Allow '(... login-shell) or '(... 'login-shell).
@@ -704,31 +703,31 @@ for, or t to get the default shell for all methods."
           (or shell second))
       first)))
 
-(defun emacs-alacritty--get-shell ()
+(defun alacritty--get-shell ()
   "Get the shell that gets run in the terminal.
-For remote directories (via TRAMP), uses `emacs-alacritty-tramp-shells'
+For remote directories (via TRAMP), uses `alacritty-tramp-shells'
 to determine the appropriate shell."
   (if (ignore-errors (file-remote-p default-directory))
       (with-parsed-tramp-file-name default-directory nil
-        (or (emacs-alacritty--tramp-get-shell method)
-            (emacs-alacritty--tramp-get-shell t)
+        (or (alacritty--tramp-get-shell method)
+            (alacritty--tramp-get-shell t)
             (with-connection-local-variables shell-file-name)
-            emacs-alacritty-shell))
-    emacs-alacritty-shell))
+            alacritty-shell))
+    alacritty-shell))
 
-(defun emacs-alacritty--quote-for-remote-shell (str)
+(defun alacritty--quote-for-remote-shell (str)
   "Quote STR for use in a remote shell command.
 Uses single quotes with proper escaping for embedded single quotes."
   (concat "'" (replace-regexp-in-string "'" "'\\\\''" str) "'"))
 
-(defun emacs-alacritty--build-remote-command ()
+(defun alacritty--build-remote-command ()
   "Build a command string to connect to a remote host via TRAMP.
 Returns a command that, when executed locally, will connect to the
 remote host and start a shell in the appropriate directory.
 Returns nil if `default-directory' is not a remote path."
   (when (ignore-errors (file-remote-p default-directory))
     (with-parsed-tramp-file-name default-directory nil
-      (let ((shell (emacs-alacritty--get-shell))
+      (let ((shell (alacritty--get-shell))
             (remote-dir (or localname "~")))
         (pcase method
           ;; SSH-based methods
@@ -740,24 +739,24 @@ Returns nil if `default-directory' is not a remote path."
                   ;; Build the remote command: cd to directory and exec shell
                   ;; The whole command needs to be quoted for SSH
                   (remote-cmd (format "cd %s && exec %s -l"
-                                      (emacs-alacritty--quote-for-remote-shell remote-dir)
+                                      (alacritty--quote-for-remote-shell remote-dir)
                                       shell)))
              ;; Quote the remote command so && is passed to remote shell
              (format "ssh %s-t %s %s"
                      port-option
                      host-arg
-                     (emacs-alacritty--quote-for-remote-shell remote-cmd))))
+                     (alacritty--quote-for-remote-shell remote-cmd))))
           ;; Docker methods
           ((or "docker" "podman")
            (let ((container host)
                  (exec-cmd (if (string= method "podman") "podman" "docker"))
                  (remote-cmd (format "cd %s && exec %s"
-                                     (emacs-alacritty--quote-for-remote-shell remote-dir)
+                                     (alacritty--quote-for-remote-shell remote-dir)
                                      shell)))
              (format "%s exec -it %s sh -c %s"
                      exec-cmd
                      container
-                     (emacs-alacritty--quote-for-remote-shell remote-cmd))))
+                     (alacritty--quote-for-remote-shell remote-cmd))))
           ;; Kubernetes/kubectl
           ("kubectl"
            (let* ((pod host)
@@ -765,168 +764,168 @@ Returns nil if `default-directory' is not a remote path."
                                (tramp-file-name-host
                                 (tramp-dissect-file-name hop))))
                   (remote-cmd (format "cd %s && exec %s"
-                                      (emacs-alacritty--quote-for-remote-shell remote-dir)
+                                      (alacritty--quote-for-remote-shell remote-dir)
                                       shell)))
              (format "kubectl exec -it %s%s -- sh -c %s"
                      (if namespace (format "-n %s " namespace) "")
                      pod
-                     (emacs-alacritty--quote-for-remote-shell remote-cmd))))
+                     (alacritty--quote-for-remote-shell remote-cmd))))
           ;; Default: try SSH as fallback
           (_
            (let* ((host-arg (if user (format "%s@%s" user host) host))
                   (remote-cmd (format "cd %s && exec %s -l"
-                                      (emacs-alacritty--quote-for-remote-shell remote-dir)
+                                      (alacritty--quote-for-remote-shell remote-dir)
                                       shell)))
              (format "ssh -t %s %s"
                      host-arg
-                     (emacs-alacritty--quote-for-remote-shell remote-cmd)))))))))
+                     (alacritty--quote-for-remote-shell remote-cmd)))))))))
 
-(defun emacs-alacritty--get-command ()
+(defun alacritty--get-command ()
   "Get the command to run in the terminal.
 For remote directories, returns a command to connect to the remote host.
 For local directories, returns a command to cd to the directory and start the shell."
-  (or (emacs-alacritty--build-remote-command)
+  (or (alacritty--build-remote-command)
       ;; Local directory - cd to it and exec the shell
       (let ((dir (expand-file-name default-directory)))
         (if (file-directory-p dir)
             (format "cd %s && exec %s"
-                    (emacs-alacritty--quote-for-remote-shell dir)
-                    emacs-alacritty-shell)
-          emacs-alacritty-shell))))
+                    (alacritty--quote-for-remote-shell dir)
+                    alacritty-shell)
+          alacritty-shell))))
 
-(defun emacs-alacritty--process-events ()
+(defun alacritty--process-events ()
   "Process pending terminal events."
-  (when emacs-alacritty--term
-    (let ((events (emacs-alacritty-poll-events emacs-alacritty--term)))
+  (when alacritty--term
+    (let ((events (alacritty--module-poll-events alacritty--term)))
       (dolist (event events)
         (pcase (car event)
           ('title
            (let ((title (cdr event)))
-             (setq emacs-alacritty--title title)
-             (emacs-alacritty--update-buffer-name)
+             (setq alacritty--title title)
+             (alacritty--update-buffer-name)
              ;; Parse title for directory information
-             (when-let ((dir-info (emacs-alacritty--parse-title-for-directory title)))
-               (apply #'emacs-alacritty--set-directory dir-info))))
+             (when-let ((dir-info (alacritty--parse-title-for-directory title)))
+               (apply #'alacritty--set-directory dir-info))))
           ('bell
            (ding))
           ('exit
-           (emacs-alacritty--handle-exit))
+           (alacritty--handle-exit))
           ('clipboard-store
            (kill-new (cdr event)))
           ('clipboard-load
-           (when (and emacs-alacritty--term (current-kill 0 t))
-             (emacs-alacritty-paste emacs-alacritty--term (current-kill 0))))
+           (when (and alacritty--term (current-kill 0 t))
+             (alacritty--module-paste alacritty--term (current-kill 0))))
           ('cursor-blink-change
-           (unless emacs-alacritty-ignore-blink-cursor
+           (unless alacritty-ignore-blink-cursor
              (let ((blink (cdr event)))
                (blink-cursor-mode (if blink 1 -1))))))))))
 
-(defun emacs-alacritty--handle-exit ()
+(defun alacritty--handle-exit ()
   "Handle terminal process exit."
   ;; Cancel timer first to prevent further refresh attempts
-  (when emacs-alacritty--timer
-    (cancel-timer emacs-alacritty--timer)
-    (setq emacs-alacritty--timer nil))
+  (when alacritty--timer
+    (cancel-timer alacritty--timer)
+    (setq alacritty--timer nil))
   ;; Clear the term pointer to prevent access to freed resources
   (let ((buf (current-buffer))
         (event "finished"))
-    (setq emacs-alacritty--term nil)
+    (setq alacritty--term nil)
     ;; Run exit hook before potentially killing the buffer
-    (run-hook-with-args 'emacs-alacritty-exit-functions
+    (run-hook-with-args 'alacritty-exit-functions
                         (if (buffer-live-p buf) buf nil)
                         event)
-    (if emacs-alacritty-kill-buffer-on-exit
+    (if alacritty-kill-buffer-on-exit
         (kill-buffer buf)
       (let ((inhibit-read-only t))
         (goto-char (point-max))
         (insert "\n\nProcess exited.\n")))))
 
-(defun emacs-alacritty--update-buffer-name ()
+(defun alacritty--update-buffer-name ()
   "Update the buffer name based on the terminal title."
-  (when (and emacs-alacritty-buffer-name-string emacs-alacritty--title)
-    (rename-buffer (format emacs-alacritty-buffer-name-string emacs-alacritty--title) t)))
+  (when (and alacritty-buffer-name-string alacritty--title)
+    (rename-buffer (format alacritty-buffer-name-string alacritty--title) t)))
 
-(defun emacs-alacritty--setup-window-hooks ()
+(defun alacritty--setup-window-hooks ()
   "Set up hooks to handle window size changes."
-  (add-hook 'window-size-change-functions #'emacs-alacritty--window-size-change nil t)
-  (add-hook 'window-configuration-change-hook #'emacs-alacritty--window-config-change nil t))
+  (add-hook 'window-size-change-functions #'alacritty--window-size-change nil t)
+  (add-hook 'window-configuration-change-hook #'alacritty--window-config-change nil t))
 
-(defun emacs-alacritty--window-size-change (_frame)
+(defun alacritty--window-size-change (_frame)
   "Handle window size changes."
-  (when (and emacs-alacritty--term
+  (when (and alacritty--term
              (eq (current-buffer) (window-buffer)))
-    (let ((size (emacs-alacritty--get-window-size)))
-      (emacs-alacritty-resize emacs-alacritty--term (car size) (cdr size)))))
+    (let ((size (alacritty--get-window-size)))
+      (alacritty--module-resize alacritty--term (car size) (cdr size)))))
 
-(defun emacs-alacritty--window-config-change ()
+(defun alacritty--window-config-change ()
   "Handle window configuration changes."
-  (emacs-alacritty--window-size-change nil))
+  (alacritty--window-size-change nil))
 
 ;; Public commands
 
 ;;;###autoload
-(defun emacs-alacritty ()
+(defun alacritty ()
   "Create a new terminal buffer.
 When `default-directory' is a TRAMP remote path, the terminal will
 connect to the remote host via SSH (or appropriate method) and start
-a shell there using `emacs-alacritty-tramp-shells'."
+a shell there using `alacritty-tramp-shells'."
   (interactive)
-  (emacs-alacritty--load-module)
+  (alacritty--load-module)
   (let ((buffer (generate-new-buffer "*alacritty*")))
     (with-current-buffer buffer
-      (emacs-alacritty-mode))
+      (alacritty-mode))
     ;; Switch to buffer first so we get correct window dimensions
     (switch-to-buffer buffer)
-    (let ((size (emacs-alacritty--get-window-size)))
+    (let ((size (alacritty--get-window-size)))
       (with-current-buffer buffer
-        (setq emacs-alacritty--term
-              (emacs-alacritty-create (car size) (cdr size)
-                                      (emacs-alacritty--get-command)
-                                      emacs-alacritty-max-scrollback))
+        (setq alacritty--term
+              (alacritty--module-create (car size) (cdr size)
+                                      (alacritty--get-command)
+                                      alacritty-max-scrollback))
         ;; Start refresh timer
-        (setq emacs-alacritty--timer
-              (run-with-timer 0.1 emacs-alacritty-timer-interval
+        (setq alacritty--timer
+              (run-with-timer 0.1 alacritty-timer-interval
                               (lambda ()
                                 (when (buffer-live-p buffer)
                                   (with-current-buffer buffer
-                                    (emacs-alacritty--refresh))))))
+                                    (alacritty--refresh))))))
         ;; Setup window hooks
-        (emacs-alacritty--setup-window-hooks)))))
+        (alacritty--setup-window-hooks)))))
 
 ;;;###autoload
-(defun emacs-alacritty-other-window ()
+(defun alacritty-other-window ()
   "Create a new terminal buffer in another window.
 When `default-directory' is a TRAMP remote path, the terminal will
 connect to the remote host via SSH (or appropriate method) and start
-a shell there using `emacs-alacritty-tramp-shells'."
+a shell there using `alacritty-tramp-shells'."
   (interactive)
-  (emacs-alacritty--load-module)
+  (alacritty--load-module)
   (let ((buffer (generate-new-buffer "*alacritty*")))
     (with-current-buffer buffer
-      (emacs-alacritty-mode))
+      (alacritty-mode))
     ;; Switch to other window first so we get correct window dimensions
     (switch-to-buffer-other-window buffer)
-    (let ((size (emacs-alacritty--get-window-size)))
+    (let ((size (alacritty--get-window-size)))
       (with-current-buffer buffer
-        (setq emacs-alacritty--term
-              (emacs-alacritty-create (car size) (cdr size)
-                                      (emacs-alacritty--get-command)
-                                      emacs-alacritty-max-scrollback))
+        (setq alacritty--term
+              (alacritty--module-create (car size) (cdr size)
+                                      (alacritty--get-command)
+                                      alacritty-max-scrollback))
         ;; Start refresh timer
-        (setq emacs-alacritty--timer
-              (run-with-timer 0.1 emacs-alacritty-timer-interval
+        (setq alacritty--timer
+              (run-with-timer 0.1 alacritty-timer-interval
                               (lambda ()
                                 (when (buffer-live-p buffer)
                                   (with-current-buffer buffer
-                                    (emacs-alacritty--refresh))))))
+                                    (alacritty--refresh))))))
         ;; Setup window hooks
-        (emacs-alacritty--setup-window-hooks)))))
+        (alacritty--setup-window-hooks)))))
 
-(define-derived-mode emacs-alacritty-mode fundamental-mode "Alacritty"
+(define-derived-mode alacritty-mode fundamental-mode "Alacritty"
   "Major mode for Alacritty terminal emulator.
 
-\\{emacs-alacritty-mode-map}"
-  :group 'emacs-alacritty
+\\{alacritty-mode-map}"
+  :group 'alacritty
   (setq buffer-read-only t)
   (setq truncate-lines t)
   (setq buffer-undo-list t)  ; Disable undo
@@ -936,7 +935,7 @@ a shell there using `emacs-alacritty-tramp-shells'."
   (setq-local hscroll-step 1)
   (setq-local auto-hscroll-mode 'current-line)
   ;; Bookmark support
-  (setq-local bookmark-make-record-function #'emacs-alacritty--bookmark-make-record)
+  (setq-local bookmark-make-record-function #'alacritty--bookmark-make-record)
   ;; Environment variables for shell
   (setenv "TERM" "xterm-256color")
   (setenv "COLORTERM" "truecolor")
@@ -944,129 +943,129 @@ a shell there using `emacs-alacritty-tramp-shells'."
 
 ;; Key sending commands
 
-(defun emacs-alacritty-send-return ()
+(defun alacritty-send-return ()
   "Send return key to terminal."
   (interactive)
-  (emacs-alacritty--send-key "return"))
+  (alacritty--send-key "return"))
 
-(defun emacs-alacritty-send-tab ()
+(defun alacritty-send-tab ()
   "Send tab key to terminal."
   (interactive)
-  (emacs-alacritty--send-key "tab"))
+  (alacritty--send-key "tab"))
 
-(defun emacs-alacritty-send-backspace ()
+(defun alacritty-send-backspace ()
   "Send backspace key to terminal."
   (interactive)
-  (emacs-alacritty--send-key "backspace"))
+  (alacritty--send-key "backspace"))
 
-(defun emacs-alacritty-send-delete ()
+(defun alacritty-send-delete ()
   "Send delete key to terminal."
   (interactive)
-  (emacs-alacritty--send-key "delete"))
+  (alacritty--send-key "delete"))
 
-(defun emacs-alacritty-send-escape ()
+(defun alacritty-send-escape ()
   "Send escape key to terminal."
   (interactive)
-  (emacs-alacritty--send-key "escape"))
+  (alacritty--send-key "escape"))
 
-(defun emacs-alacritty-send-up ()
+(defun alacritty-send-up ()
   "Send up arrow key to terminal."
   (interactive)
-  (emacs-alacritty--send-key "up"))
+  (alacritty--send-key "up"))
 
-(defun emacs-alacritty-send-down ()
+(defun alacritty-send-down ()
   "Send down arrow key to terminal."
   (interactive)
-  (emacs-alacritty--send-key "down"))
+  (alacritty--send-key "down"))
 
-(defun emacs-alacritty-send-left ()
+(defun alacritty-send-left ()
   "Send left arrow key to terminal."
   (interactive)
-  (emacs-alacritty--send-key "left"))
+  (alacritty--send-key "left"))
 
-(defun emacs-alacritty-send-right ()
+(defun alacritty-send-right ()
   "Send right arrow key to terminal."
   (interactive)
-  (emacs-alacritty--send-key "right"))
+  (alacritty--send-key "right"))
 
-(defun emacs-alacritty-send-home ()
+(defun alacritty-send-home ()
   "Send home key to terminal."
   (interactive)
-  (emacs-alacritty--send-key "home"))
+  (alacritty--send-key "home"))
 
-(defun emacs-alacritty-send-end ()
+(defun alacritty-send-end ()
   "Send end key to terminal."
   (interactive)
-  (emacs-alacritty--send-key "end"))
+  (alacritty--send-key "end"))
 
-(defun emacs-alacritty-send-page-up ()
+(defun alacritty-send-page-up ()
   "Send page up key to terminal."
   (interactive)
-  (emacs-alacritty--send-key "page-up"))
+  (alacritty--send-key "page-up"))
 
-(defun emacs-alacritty-send-page-down ()
+(defun alacritty-send-page-down ()
   "Send page down key to terminal."
   (interactive)
-  (emacs-alacritty--send-key "page-down"))
+  (alacritty--send-key "page-down"))
 
-(defun emacs-alacritty-send-insert ()
+(defun alacritty-send-insert ()
   "Send insert key to terminal."
   (interactive)
-  (emacs-alacritty--send-key "insert"))
+  (alacritty--send-key "insert"))
 
-(defun emacs-alacritty--insert-for-yank (text)
+(defun alacritty--insert-for-yank (text)
   "Send TEXT to the terminal instead of inserting in buffer.
 This is used to override `insert-for-yank' during yank operations."
-  (when (and emacs-alacritty--term text)
-    (emacs-alacritty-paste emacs-alacritty--term text)))
+  (when (and alacritty--term text)
+    (alacritty--module-paste alacritty--term text)))
 
-(defun emacs-alacritty-yank (&optional arg)
+(defun alacritty-yank (&optional arg)
   "Paste from kill ring to terminal.
 ARG is passed to `yank'."
   (interactive "P")
   (deactivate-mark)
   (let ((inhibit-read-only t))
-    (cl-letf (((symbol-function 'insert-for-yank) #'emacs-alacritty--insert-for-yank))
+    (cl-letf (((symbol-function 'insert-for-yank) #'alacritty--insert-for-yank))
       (yank arg))))
 
-(defun emacs-alacritty-yank-pop (&optional arg)
+(defun alacritty-yank-pop (&optional arg)
   "Cycle through kill ring and paste to terminal.
 ARG is passed to `yank-pop'."
   (interactive "p")
   (let ((inhibit-read-only t)
         (yank-undo-function (lambda (_start _end) nil)))  ; No-op undo
-    (cl-letf (((symbol-function 'insert-for-yank) #'emacs-alacritty--insert-for-yank))
+    (cl-letf (((symbol-function 'insert-for-yank) #'alacritty--insert-for-yank))
       (yank-pop arg))))
 
-(defun emacs-alacritty-yank-primary ()
+(defun alacritty-yank-primary ()
   "Paste the primary selection to the terminal."
   (interactive)
-  (when emacs-alacritty--term
+  (when alacritty--term
     (let ((primary (gui-get-primary-selection)))
       (when (and primary (not (string-empty-p primary)))
-        (emacs-alacritty-paste emacs-alacritty--term primary)))))
+        (alacritty--module-paste alacritty--term primary)))))
 
-(defun emacs-alacritty-send-next-key ()
+(defun alacritty-send-next-key ()
   "Read the next key and send it to the terminal."
   (interactive)
   (let ((key (read-key "Send key: ")))
     (when (characterp key)
-      (emacs-alacritty-write-input emacs-alacritty--term (char-to-string key)))))
+      (alacritty--module-write-input alacritty--term (char-to-string key)))))
 
 ;; Copy mode
 
-(defun emacs-alacritty--remove-fake-newlines (text start-line)
+(defun alacritty--remove-fake-newlines (text start-line)
   "Remove fake newlines from TEXT.
 START-LINE is the 1-indexed line number where the text starts.
-Fake newlines are identified by checking `emacs-alacritty--fake-newlines'."
-  (if (or (not emacs-alacritty-copy-mode-remove-fake-newlines)
-          (null emacs-alacritty--fake-newlines))
+Fake newlines are identified by checking `alacritty--fake-newlines'."
+  (if (or (not alacritty-copy-mode-remove-fake-newlines)
+          (null alacritty--fake-newlines))
       text
     (let ((lines (split-string text "\n"))
           (result nil)
           (current-line start-line))
       (dolist (line lines)
-        (if (memq current-line emacs-alacritty--fake-newlines)
+        (if (memq current-line alacritty--fake-newlines)
             ;; This line has a fake newline - don't add newline after it
             (setq result (concat result line))
           ;; Real newline
@@ -1076,42 +1075,42 @@ Fake newlines are identified by checking `emacs-alacritty--fake-newlines'."
         (setq current-line (1+ current-line)))
       result)))
 
-(defun emacs-alacritty--get-prompt-end ()
+(defun alacritty--get-prompt-end ()
   "Get the buffer position of the end of the prompt on the current line.
 Returns nil if no prompt is detected."
   ;; The prompt end is typically marked by shell integration.
   ;; For now, we use a heuristic: look for common prompt patterns.
-  ;; Users can customize `emacs-alacritty--prompt-end' if needed.
-  emacs-alacritty--prompt-end)
+  ;; Users can customize `alacritty--prompt-end' if needed.
+  alacritty--prompt-end)
 
-(defun emacs-alacritty--filter-buffer-substring (beg end &optional _delete)
+(defun alacritty--filter-buffer-substring (beg end &optional _delete)
   "Filter text between BEG and END, removing fake newlines.
 This is used as `filter-buffer-substring-function' in copy mode."
   (let* ((text (buffer-substring beg end))
          (start-line (line-number-at-pos beg)))
-    (emacs-alacritty--remove-fake-newlines text start-line)))
+    (alacritty--remove-fake-newlines text start-line)))
 
-(defun emacs-alacritty-copy-mode ()
+(defun alacritty-copy-mode ()
   "Toggle copy mode.
 In copy mode, the terminal acts like a normal buffer for
 selecting and copying text.  Fake newlines (from line wrapping)
 are automatically removed when copying."
   (interactive)
-  (setq emacs-alacritty--copy-mode (not emacs-alacritty--copy-mode))
-  (if emacs-alacritty--copy-mode
+  (setq alacritty--copy-mode (not alacritty--copy-mode))
+  (if alacritty--copy-mode
       (progn
         (setq buffer-read-only t)
-        (use-local-map emacs-alacritty-copy-mode-map)
+        (use-local-map alacritty-copy-mode-map)
         ;; Set up filter for removing fake newlines
         (setq-local filter-buffer-substring-function
-                    #'emacs-alacritty--filter-buffer-substring)
+                    #'alacritty--filter-buffer-substring)
         (message "Copy mode enabled. Press 'q' to exit, RET to copy selection."))
-    (use-local-map emacs-alacritty-mode-map)
+    (use-local-map alacritty-mode-map)
     ;; Restore default filter
     (kill-local-variable 'filter-buffer-substring-function)
     (message "Copy mode disabled.")))
 
-(defun emacs-alacritty-copy-mode-done ()
+(defun alacritty-copy-mode-done ()
   "Exit copy mode, copying the selection if active.
 Fake newlines are automatically removed from the copied text."
   (interactive)
@@ -1120,92 +1119,92 @@ Fake newlines are automatically removed from the copied text."
            (end (region-end))
            (start-line (line-number-at-pos beg))
            (text (buffer-substring-no-properties beg end))
-           (filtered-text (emacs-alacritty--remove-fake-newlines text start-line)))
+           (filtered-text (alacritty--remove-fake-newlines text start-line)))
       ;; Optionally exclude prompt
-      (when (and emacs-alacritty-copy-exclude-prompt
-                 emacs-alacritty--prompt-end
-                 (>= emacs-alacritty--prompt-end beg)
-                 (<= emacs-alacritty--prompt-end end))
+      (when (and alacritty-copy-exclude-prompt
+                 alacritty--prompt-end
+                 (>= alacritty--prompt-end beg)
+                 (<= alacritty--prompt-end end))
         ;; Adjust text to exclude prompt portion
-        (let ((prompt-offset (- emacs-alacritty--prompt-end beg)))
+        (let ((prompt-offset (- alacritty--prompt-end beg)))
           (when (> prompt-offset 0)
             (setq filtered-text (substring filtered-text prompt-offset)))))
       (kill-new filtered-text)))
   (deactivate-mark)
-  (emacs-alacritty-copy-mode))
+  (alacritty-copy-mode))
 
 ;; Utility commands
 
-(defun emacs-alacritty-clear-scrollback ()
+(defun alacritty-clear-scrollback ()
   "Clear the terminal scrollback buffer."
   (interactive)
-  (when emacs-alacritty--term
-    (emacs-alacritty-write-input emacs-alacritty--term "\033[3J\033[H\033[2J")))
+  (when alacritty--term
+    (alacritty--module-write-input alacritty--term "\033[3J\033[H\033[2J")))
 
-(defun emacs-alacritty-reset ()
+(defun alacritty-reset ()
   "Reset the terminal."
   (interactive)
-  (when emacs-alacritty--term
-    (emacs-alacritty-write-input emacs-alacritty--term "\033c")))
+  (when alacritty--term
+    (alacritty--module-write-input alacritty--term "\033c")))
 
-(defun emacs-alacritty-send-string (string)
+(defun alacritty-send-string (string)
   "Send STRING to the terminal."
   (interactive "sSend string: ")
-  (when emacs-alacritty--term
-    (emacs-alacritty-write-input emacs-alacritty--term string)))
+  (when alacritty--term
+    (alacritty--module-write-input alacritty--term string)))
 
 ;; Bookmark support
 
-(defun emacs-alacritty--bookmark-make-record ()
+(defun alacritty--bookmark-make-record ()
   "Create a bookmark for the current terminal.
 Records the current directory and buffer name."
   `(nil
-    (handler . emacs-alacritty--bookmark-handler)
+    (handler . alacritty--bookmark-handler)
     (thisdir . ,default-directory)
     (buf-name . ,(buffer-name))
     (defaults . nil)))
 
 ;;;###autoload
-(defun emacs-alacritty--bookmark-handler (bmk)
+(defun alacritty--bookmark-handler (bmk)
   "Handler to restore a terminal bookmark BMK.
 If a terminal buffer of the same name does not exist, creates a new one.
 Also checks the current directory and sets it to the bookmarked directory
-if `emacs-alacritty-bookmark-check-dir' is non-nil."
+if `alacritty-bookmark-check-dir' is non-nil."
   (let* ((thisdir (bookmark-prop-get bmk 'thisdir))
          (buf-name (bookmark-prop-get bmk 'buf-name))
          (buf (get-buffer buf-name))
          (thismode (and buf (with-current-buffer buf major-mode))))
     ;; Create if no such terminal buffer exists
-    (when (or (not buf) (not (eq thismode 'emacs-alacritty-mode)))
+    (when (or (not buf) (not (eq thismode 'alacritty-mode)))
       (setq buf (generate-new-buffer buf-name))
       (with-current-buffer buf
-        (when emacs-alacritty-bookmark-check-dir
+        (when alacritty-bookmark-check-dir
           (setq default-directory thisdir))
-        (emacs-alacritty-mode)
+        (alacritty-mode)
         ;; Initialize the terminal
-        (let ((size (emacs-alacritty--get-window-size)))
-          (setq emacs-alacritty--term
-                (emacs-alacritty-create (car size) (cdr size)
-                                        (emacs-alacritty--get-command)
-                                        emacs-alacritty-max-scrollback))
-          (setq emacs-alacritty--timer
-                (run-with-timer 0.1 emacs-alacritty-timer-interval
+        (let ((size (alacritty--get-window-size)))
+          (setq alacritty--term
+                (alacritty--module-create (car size) (cdr size)
+                                        (alacritty--get-command)
+                                        alacritty-max-scrollback))
+          (setq alacritty--timer
+                (run-with-timer 0.1 alacritty-timer-interval
                                 (let ((buffer buf))
                                   (lambda ()
                                     (when (buffer-live-p buffer)
                                       (with-current-buffer buffer
-                                        (emacs-alacritty--refresh)))))))
-          (emacs-alacritty--setup-window-hooks))))
+                                        (alacritty--refresh)))))))
+          (alacritty--setup-window-hooks))))
     ;; Check the current directory
     (with-current-buffer buf
-      (when (and emacs-alacritty-bookmark-check-dir
+      (when (and alacritty-bookmark-check-dir
                  (not (string-equal default-directory thisdir)))
-        (when emacs-alacritty--copy-mode
-          (emacs-alacritty-copy-mode))
-        (emacs-alacritty-write-input emacs-alacritty--term (concat "cd " thisdir))
-        (emacs-alacritty--send-key "return")))
+        (when alacritty--copy-mode
+          (alacritty-copy-mode))
+        (alacritty--module-write-input alacritty--term (concat "cd " thisdir))
+        (alacritty--send-key "return")))
     ;; Set to this terminal buffer
     (set-buffer buf)))
 
-(provide 'emacs-alacritty)
-;;; emacs-alacritty.el ends here
+(provide 'alacritty)
+;;; alacritty.el ends here

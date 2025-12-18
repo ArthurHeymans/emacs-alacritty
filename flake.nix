@@ -1,5 +1,5 @@
 {
-  description = "Emacs Alacritty Terminal - Terminal emulator for Emacs using alacritty_terminal";
+  description = "Alacritty Terminal for Emacs - Terminal emulator for Emacs using alacritty_terminal";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -38,7 +38,7 @@
           inherit nativeBuildInputs buildInputs;
           
           shellHook = ''
-            echo "Emacs Alacritty development environment"
+            echo "Alacritty for Emacs development environment"
             echo "Rust version: $(rustc --version)"
             echo ""
             echo "Build commands:"
@@ -51,7 +51,7 @@
         };
         
         packages.default = pkgs.rustPlatform.buildRustPackage {
-          pname = "emacs-alacritty";
+          pname = "alacritty-emacs";
           version = "0.1.0";
           
           src = ./.;
@@ -66,8 +66,8 @@
           # The output is a dynamic library
           postInstall = ''
             mkdir -p $out/share/emacs/site-lisp
-            cp $src/emacs-alacritty.el $out/share/emacs/site-lisp/
-            cp $out/lib/libemacs_alacritty.so $out/share/emacs/site-lisp/ || true
+            cp $src/alacritty.el $out/share/emacs/site-lisp/
+            cp $out/lib/libalacritty_emacs.so $out/share/emacs/site-lisp/ || true
           '';
         };
       }

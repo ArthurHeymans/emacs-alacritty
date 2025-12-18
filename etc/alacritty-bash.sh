@@ -1,5 +1,5 @@
-# Emacs-alacritty shell integration for bash
-# Source this file in your bashrc when running inside emacs-alacritty
+# Alacritty shell integration for bash
+# Source this file in your bashrc when running inside alacritty
 
 function alacritty_printf(){
     if [ -n "$TMUX" ] && ([ "${TERM%%-*}" = "tmux" ] || [ "${TERM%%-*}" = "screen" ] ); then
@@ -25,7 +25,7 @@ fi
 # With alacritty_cmd you can execute Emacs commands directly from the shell.
 # For example, alacritty_cmd message "HI" will print "HI".
 # To enable new commands, you have to customize Emacs's variable
-# emacs-alacritty-eval-cmds.
+# alacritty-eval-cmds.
 alacritty_cmd() {
     local elisp
     elisp=""
@@ -39,7 +39,7 @@ alacritty_cmd() {
 # This is to change the title of the buffer based on information provided by the
 # shell. See, http://tldp.org/HOWTO/Xterm-Title-4.html, for the meaning of the
 # various symbols.
-# Format: user@host:path - this allows emacs-alacritty to track the directory
+# Format: user@host:path - this allows alacritty to track the directory
 PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND; }"'echo -ne "\033]0;$(whoami)@${HOSTNAME}:${PWD}\007"'
 
 # Note: Directory tracking is done via the title (OSC 0) which includes user@host:path

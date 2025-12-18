@@ -1,7 +1,7 @@
-//! Emacs Alacritty Terminal - Terminal emulator for Emacs using alacritty_terminal
+//! Alacritty Terminal for Emacs - Terminal emulator for Emacs using alacritty_terminal
 //!
 //! This module provides a terminal emulator for Emacs using the alacritty_terminal
-//! library, similar to emacs-libvterm but using Alacritty's terminal emulation.
+//! library, similar to vterm but using Alacritty's terminal emulation.
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, Msg, Notifier};
@@ -388,14 +388,14 @@ fn color_to_rgb(color: &Color) -> (u8, u8, u8) {
     }
 }
 
-#[emacs::module(name = "emacs-alacritty")]
+#[emacs::module(name = "alacritty")]
 fn init(_env: &Env) -> Result<()> {
     Ok(())
 }
 
 /// Create a new terminal with the given dimensions
 /// Returns a user pointer to the terminal state
-#[defun(user_ptr)]
+#[defun(user_ptr, name = "alacritty--module-create")]
 fn create(
     cols: i64,
     lines: i64,
@@ -408,21 +408,21 @@ fn create(
 }
 
 /// Write data to the terminal PTY (send input to the shell)
-#[defun]
+#[defun(name = "alacritty--module-write-input")]
 fn write_input(term: &AlacrittyTerm, data: String) -> Result<()> {
     term.write(data.as_bytes());
     Ok(())
 }
 
 /// Resize the terminal to new dimensions
-#[defun]
+#[defun(name = "alacritty--module-resize")]
 fn resize(term: &AlacrittyTerm, cols: i64, lines: i64) -> Result<()> {
     term.resize(cols as usize, lines as usize);
     Ok(())
 }
 
 /// Get the terminal content as a plain string
-#[defun]
+#[defun(name = "alacritty--module-get-text")]
 fn get_text(term: &AlacrittyTerm) -> Result<String> {
     Ok(term.get_content())
 }
@@ -430,7 +430,7 @@ fn get_text(term: &AlacrittyTerm) -> Result<String> {
 /// Get the terminal content with styling information (visible screen only)
 /// Returns a list of lines, where each line is a list of styled segments:
 /// ((text fg-color bg-color bold italic underline) ...)
-#[defun]
+#[defun(name = "alacritty--module-get-styled-content")]
 fn get_styled_content<'e>(env: &'e Env, term: &AlacrittyTerm) -> Result<Value<'e>> {
     let term_lock = term.term.lock();
     let grid = term_lock.grid();
@@ -452,7 +452,7 @@ fn get_styled_content<'e>(env: &'e Env, term: &AlacrittyTerm) -> Result<Value<'e
 /// Returns a list of lines, where each line is a list of styled segments:
 /// ((text fg-color bg-color bold italic underline) ...)
 /// Lines are returned from oldest (top of scrollback) to newest (bottom of screen)
-#[defun]
+#[defun(name = "alacritty--module-get-full-styled-content")]
 fn get_full_styled_content<'e>(env: &'e Env, term: &AlacrittyTerm) -> Result<Value<'e>> {
     let term_lock = term.term.lock();
     let grid = term_lock.grid();
@@ -476,7 +476,7 @@ fn get_full_styled_content<'e>(env: &'e Env, term: &AlacrittyTerm) -> Result<Val
 }
 
 /// Get the number of scrollback (history) lines
-#[defun]
+#[defun(name = "alacritty--module-history-size")]
 fn history_size(term: &AlacrittyTerm) -> Result<i64> {
     let term_lock = term.term.lock();
     let grid = term_lock.grid();
@@ -603,7 +603,7 @@ fn make_segment<'e>(
 /// Returns true if the line continues on the next line (i.e., should NOT have a real newline)
 /// Line index is 0-based from the start of the buffer (including scrollback)
 /// So line 0 is the first line of scrollback, and scrollback_size + screen_line is the visible area
-#[defun]
+#[defun(name = "alacritty--module-line-wraps")]
 fn line_wraps(term: &AlacrittyTerm, line: i64) -> Result<bool> {
     let term_lock = term.term.lock();
     let grid = term_lock.grid();
@@ -628,57 +628,57 @@ fn line_wraps(term: &AlacrittyTerm, line: i64) -> Result<bool> {
 }
 
 /// Get the cursor row (0-indexed)
-#[defun]
+#[defun(name = "alacritty--module-cursor-row")]
 fn cursor_row(term: &AlacrittyTerm) -> Result<i64> {
     Ok(term.cursor_position().0 as i64)
 }
 
 /// Get the cursor column (0-indexed)
-#[defun]
+#[defun(name = "alacritty--module-cursor-col")]
 fn cursor_col(term: &AlacrittyTerm) -> Result<i64> {
     Ok(term.cursor_position().1 as i64)
 }
 
 /// Check if the terminal process has exited
-#[defun]
+#[defun(name = "alacritty--module-is-exited")]
 fn is_exited(term: &AlacrittyTerm) -> Result<bool> {
     Ok(term.is_exited())
 }
 
 /// Check if the terminal content has changed and needs redrawing
-#[defun]
+#[defun(name = "alacritty--module-is-dirty")]
 fn is_dirty(term: &AlacrittyTerm) -> Result<bool> {
     Ok(term.is_dirty())
 }
 
 /// Clear the dirty flag after redrawing
-#[defun]
+#[defun(name = "alacritty--module-clear-dirty")]
 fn clear_dirty(term: &AlacrittyTerm) -> Result<()> {
     term.clear_dirty();
     Ok(())
 }
 
 /// Get the terminal title (set by the shell/programs via escape sequences)
-#[defun]
+#[defun(name = "alacritty--module-get-title")]
 fn get_title(term: &AlacrittyTerm) -> Result<String> {
     Ok(term.get_title())
 }
 
 /// Get the number of columns
-#[defun]
+#[defun(name = "alacritty--module-columns")]
 fn columns(term: &AlacrittyTerm) -> Result<i64> {
     Ok(term.size.lock().cols as i64)
 }
 
 /// Get the number of lines
-#[defun]
+#[defun(name = "alacritty--module-lines")]
 fn lines(term: &AlacrittyTerm) -> Result<i64> {
     Ok(term.size.lock().lines as i64)
 }
 
 /// Process pending events and return event info
 /// Returns a list of events: ((type . data) ...)
-#[defun]
+#[defun(name = "alacritty--module-poll-events")]
 fn poll_events<'e>(env: &'e Env, term: &AlacrittyTerm) -> Result<Value<'e>> {
     let events = term.process_events();
     let mut result = env.intern("nil")?;
@@ -730,38 +730,38 @@ fn poll_events<'e>(env: &'e Env, term: &AlacrittyTerm) -> Result<Value<'e>> {
 }
 
 /// Check if the terminal is in application cursor mode
-#[defun]
+#[defun(name = "alacritty--module-app-cursor-mode")]
 fn app_cursor_mode(term: &AlacrittyTerm) -> Result<bool> {
     Ok(term.get_mode().contains(TermMode::APP_CURSOR))
 }
 
 /// Check if the terminal is in application keypad mode
-#[defun]
+#[defun(name = "alacritty--module-app-keypad-mode")]
 fn app_keypad_mode(term: &AlacrittyTerm) -> Result<bool> {
     Ok(term.get_mode().contains(TermMode::APP_KEYPAD))
 }
 
 /// Check if the terminal is in alternate screen mode
-#[defun]
+#[defun(name = "alacritty--module-alt-screen-mode")]
 fn alt_screen_mode(term: &AlacrittyTerm) -> Result<bool> {
     Ok(term.get_mode().contains(TermMode::ALT_SCREEN))
 }
 
 /// Check if bracketed paste mode is enabled
-#[defun]
+#[defun(name = "alacritty--module-bracketed-paste-mode")]
 fn bracketed_paste_mode(term: &AlacrittyTerm) -> Result<bool> {
     Ok(term.get_mode().contains(TermMode::BRACKETED_PASTE))
 }
 
 /// Check if the cursor should be blinking
-#[defun]
+#[defun(name = "alacritty--module-cursor-blink")]
 fn cursor_blink(term: &AlacrittyTerm) -> Result<bool> {
     let term_lock = term.term.lock();
     Ok(term_lock.cursor_style().blinking)
 }
 
 /// Get a single line of terminal content (0-indexed)
-#[defun]
+#[defun(name = "alacritty--module-get-line")]
 fn get_line(term: &AlacrittyTerm, line: i64) -> Result<String> {
     let term_lock = term.term.lock();
     let grid = term_lock.grid();
@@ -792,7 +792,7 @@ fn get_line(term: &AlacrittyTerm, line: i64) -> Result<String> {
 
 /// Get cell at position with attributes
 /// Returns (char fg-color bg-color flags) or nil if out of bounds
-#[defun]
+#[defun(name = "alacritty--module-get-cell")]
 fn get_cell<'e>(env: &'e Env, term: &AlacrittyTerm, row: i64, col: i64) -> Result<Value<'e>> {
     let term_lock = term.term.lock();
     let grid = term_lock.grid();
@@ -852,7 +852,7 @@ fn get_cell<'e>(env: &'e Env, term: &AlacrittyTerm, row: i64, col: i64) -> Resul
 /// Send a special key to the terminal
 /// Key can be: up, down, left, right, home, end, page-up, page-down,
 /// tab, backspace, delete, insert, enter, escape, f1-f12
-#[defun]
+#[defun(name = "alacritty--module-send-key")]
 fn send_key(term: &AlacrittyTerm, key: String, modifiers: Option<String>) -> Result<()> {
     let mode = term.get_mode();
     let app_cursor = mode.contains(TermMode::APP_CURSOR);
@@ -943,7 +943,7 @@ fn send_key(term: &AlacrittyTerm, key: String, modifiers: Option<String>) -> Res
 
 /// Send a character with modifiers
 /// Handles ctrl+char, meta+char combinations
-#[defun]
+#[defun(name = "alacritty--module-send-char")]
 fn send_char(term: &AlacrittyTerm, c: i64, modifiers: Option<String>) -> Result<()> {
     let ch = char::from_u32(c as u32).unwrap_or('\0');
     let mods = modifiers.unwrap_or_default();
@@ -971,7 +971,7 @@ fn send_char(term: &AlacrittyTerm, c: i64, modifiers: Option<String>) -> Result<
 }
 
 /// Send a paste with optional bracketed paste mode support
-#[defun]
+#[defun(name = "alacritty--module-paste")]
 fn paste(term: &AlacrittyTerm, text: String) -> Result<()> {
     let mode = term.get_mode();
     let bracketed = mode.contains(TermMode::BRACKETED_PASTE);

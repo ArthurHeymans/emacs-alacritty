@@ -1,6 +1,6 @@
-# emacs-alacritty
+# alacritty.el
 
-A terminal emulator for Emacs using the [alacritty_terminal](https://crates.io/crates/alacritty_terminal) library. Similar to [emacs-libvterm](https://github.com/akermu/emacs-libvterm) but powered by Alacritty's terminal emulation.
+A terminal emulator for Emacs using the [alacritty_terminal](https://crates.io/crates/alacritty_terminal) library. Similar to [vterm](https://github.com/akermu/emacs-libvterm) but powered by Alacritty's terminal emulation.
 
 ## Features
 
@@ -23,8 +23,8 @@ A terminal emulator for Emacs using the [alacritty_terminal](https://crates.io/c
 
 ```bash
 # Clone the repository
-git clone https://github.com/emacs-alacritty/emacs-alacritty
-cd emacs-alacritty
+git clone https://github.com/alacritty/alacritty.el
+cd alacritty.el
 
 # Build the dynamic module
 cargo build --release
@@ -42,19 +42,19 @@ nix develop
 
 ```elisp
 ;; Add to load-path
-(add-to-list 'load-path "/path/to/emacs-alacritty")
-(require 'emacs-alacritty)
+(add-to-list 'load-path "/path/to/alacritty.el")
+(require 'alacritty)
 
 ;; Optional: set default shell
-(setq emacs-alacritty-shell "/bin/zsh")
+(setq alacritty-shell "/bin/zsh")
 ```
 
 ## Usage
 
 ### Basic commands
 
-- `M-x emacs-alacritty` - Open a new terminal in current window
-- `M-x emacs-alacritty-other-window` - Open terminal in another window
+- `M-x alacritty` - Open a new terminal in current window
+- `M-x alacritty-other-window` - Open terminal in another window
 
 ### Key bindings
 
@@ -80,18 +80,18 @@ Fake newlines (from line wrapping) are automatically removed when copying.
 
 ### Remote terminals (TRAMP)
 
-When `default-directory` is a TRAMP path, emacs-alacritty automatically connects to the remote host:
+When `default-directory` is a TRAMP path, alacritty automatically connects to the remote host:
 
 ```elisp
 ;; Open terminal on remote host
 (let ((default-directory "/ssh:user@host:/home/user/"))
-  (emacs-alacritty))
+  (alacritty))
 ```
 
-Configure remote shells via `emacs-alacritty-tramp-shells`:
+Configure remote shells via `alacritty-tramp-shells`:
 
 ```elisp
-(setq emacs-alacritty-tramp-shells
+(setq alacritty-tramp-shells
       '(("ssh" login-shell)
         ("docker" "/bin/sh")))
 ```
@@ -103,21 +103,21 @@ Source the appropriate script in your shell configuration for directory tracking
 **Bash** (`~/.bashrc`):
 ```bash
 if [[ "$INSIDE_EMACS" = 'alacritty' ]]; then
-    source /path/to/emacs-alacritty/etc/emacs-alacritty-bash.sh
+    source /path/to/alacritty.el/etc/alacritty-bash.sh
 fi
 ```
 
 **Zsh** (`~/.zshrc`):
 ```zsh
 if [[ "$INSIDE_EMACS" = 'alacritty' ]]; then
-    source /path/to/emacs-alacritty/etc/emacs-alacritty-zsh.sh
+    source /path/to/alacritty.el/etc/alacritty-zsh.sh
 fi
 ```
 
 **Fish** (`~/.config/fish/config.fish`):
 ```fish
 if test "$INSIDE_EMACS" = 'alacritty'
-    source /path/to/emacs-alacritty/etc/emacs-alacritty.fish
+    source /path/to/alacritty.el/etc/alacritty.fish
 end
 ```
 
@@ -127,22 +127,22 @@ end
 
 ```elisp
 ;; Shell to run (default: $SHELL or /bin/sh)
-(setq emacs-alacritty-shell "/bin/zsh")
+(setq alacritty-shell "/bin/zsh")
 
 ;; Kill buffer when terminal exits (default: t)
-(setq emacs-alacritty-kill-buffer-on-exit t)
+(setq alacritty-kill-buffer-on-exit t)
 
 ;; Refresh interval in seconds (default: 0.05)
-(setq emacs-alacritty-timer-interval 0.05)
+(setq alacritty-timer-interval 0.05)
 
 ;; Buffer name format (default: "alacritty %s")
-(setq emacs-alacritty-buffer-name-string "alacritty %s")
+(setq alacritty-buffer-name-string "alacritty %s")
 
 ;; Remove fake newlines when copying (default: t)
-(setq emacs-alacritty-copy-mode-remove-fake-newlines t)
+(setq alacritty-copy-mode-remove-fake-newlines t)
 
 ;; Ignore cursor blink requests from applications (default: t)
-(setq emacs-alacritty-ignore-blink-cursor t)
+(setq alacritty-ignore-blink-cursor t)
 ```
 
 ### Exit hook
@@ -150,7 +150,7 @@ end
 Run custom code when terminals exit:
 
 ```elisp
-(add-hook 'emacs-alacritty-exit-functions
+(add-hook 'alacritty-exit-functions
           (lambda (buffer event)
             (message "Terminal %s exited: %s"
                      (if buffer (buffer-name buffer) "<killed>")
@@ -162,10 +162,10 @@ Run custom code when terminals exit:
 Define Emacs commands callable from the terminal:
 
 ```elisp
-(setq emacs-alacritty-eval-cmds
+(setq alacritty-eval-cmds
       '(("find-file" find-file)
         ("message" message)
-        ("vterm-clear-scrollback" emacs-alacritty-clear-scrollback)))
+        ("vterm-clear-scrollback" alacritty-clear-scrollback)))
 ```
 
 Then call from shell: `alacritty_cmd find-file "/path/to/file"`

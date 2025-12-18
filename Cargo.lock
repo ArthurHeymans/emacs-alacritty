@@ -12,6 +12,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "alacritty-emacs"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "emacs",
+ "log",
+ "parking_lot",
+]
+
+[[package]]
 name = "alacritty_terminal"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -154,16 +164,6 @@ dependencies = [
  "once_cell",
  "rustc_version",
  "thiserror",
-]
-
-[[package]]
-name = "emacs-alacritty"
-version = "0.1.0"
-dependencies = [
- "alacritty_terminal",
- "emacs",
- "log",
- "parking_lot",
 ]
 
 [[package]]

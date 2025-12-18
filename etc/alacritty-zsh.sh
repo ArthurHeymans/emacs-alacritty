@@ -1,5 +1,5 @@
-# Emacs-alacritty shell integration for zsh
-# Source this file in your zshrc when running inside emacs-alacritty
+# Alacritty shell integration for zsh
+# Source this file in your zshrc when running inside alacritty
 
 alacritty_printf(){
     if [ -n "$TMUX" ] && ([ "${TERM%%-*}" = "tmux" ] || [ "${TERM%%-*}" = "screen" ]); then

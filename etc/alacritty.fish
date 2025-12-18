@@ -1,5 +1,5 @@
-# Emacs-alacritty shell integration for fish
-# Source this file in your fish config when running inside emacs-alacritty
+# Alacritty shell integration for fish
+# Source this file in your fish config when running inside alacritty
 
 function alacritty_printf;
     if begin; [  -n "$TMUX" ]  ; and  string match -q -r "screen|tmux" "$TERM"; end 
@@ -25,7 +25,7 @@ end
 # This is to change the title of the buffer based on information provided by the
 # shell. See, http://tldp.org/HOWTO/Xterm-Title-4.html, for the meaning of the
 # various symbols.
-# Format: user@host:path - this allows emacs-alacritty to track the directory
+# Format: user@host:path - this allows alacritty to track the directory
 function fish_title
     whoami
     echo "@"
@@ -37,8 +37,8 @@ end
 # With alacritty_cmd you can execute Emacs commands directly from the shell.
 # For example, alacritty_cmd message "HI" will print "HI".
 # To enable new commands, you have to customize Emacs's variable
-# emacs-alacritty-eval-cmds.
-function alacritty_cmd --description 'Run an Emacs command among the ones defined in emacs-alacritty-eval-cmds.'
+# alacritty-eval-cmds.
+function alacritty_cmd --description 'Run an Emacs command among the ones defined in alacritty-eval-cmds.'
     set -l elisp ()
     for arg in $argv
         set -a elisp (printf '"%s" ' (string replace -a -r '([\\\\"])' '\\\\\\\\$1' $arg))
