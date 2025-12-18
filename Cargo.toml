@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
+name = "alacritty_emacs"
+path = "src/lib.rs"
 crate-type = ["cdylib"]
 
 [dependencies]
