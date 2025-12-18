@@ -141,7 +141,12 @@ pub struct AlacrittyTerm {
 }
 
 impl AlacrittyTerm {
-    fn new(cols: usize, lines: usize, shell: Option<String>) -> std::result::Result<Self, String> {
+    fn new(
+        cols: usize,
+        lines: usize,
+        shell: Option<String>,
+        scrollback_lines: usize,
+    ) -> std::result::Result<Self, String> {
         let size = TermSize::new(cols, lines);
         let (event_tx, event_rx) = channel();
 
@@ -179,8 +184,11 @@ impl AlacrittyTerm {
         // Create the event listener with the PTY write channel
         let event_listener = EmacEventListener::new(event_tx, pty_write_tx);
 
-        // Create the terminal
-        let config = Config::default();
+        // Create the terminal with custom scrollback size
+        let config = Config {
+            scrolling_history: scrollback_lines,
+            ..Config::default()
+        };
         let term = Term::new(config, &size, event_listener.clone());
         let term = Arc::new(FairMutex::new(term));
 
@@ -388,8 +396,15 @@ fn init(_env: &Env) -> Result<()> {
 /// Create a new terminal with the given dimensions
 /// Returns a user pointer to the terminal state
 #[defun(user_ptr)]
-fn create(cols: i64, lines: i64, shell: Option<String>) -> Result<AlacrittyTerm> {
-    AlacrittyTerm::new(cols as usize, lines as usize, shell).map_err(|e| emacs::Error::msg(e))
+fn create(
+    cols: i64,
+    lines: i64,
+    shell: Option<String>,
+    scrollback: Option<i64>,
+) -> Result<AlacrittyTerm> {
+    let scrollback_lines = scrollback.unwrap_or(10000) as usize;
+    AlacrittyTerm::new(cols as usize, lines as usize, shell, scrollback_lines)
+        .map_err(|e| emacs::Error::msg(e))
 }
 
 /// Write data to the terminal PTY (send input to the shell)
@@ -412,7 +427,7 @@ fn get_text(term: &AlacrittyTerm) -> Result<String> {
     Ok(term.get_content())
 }
 
-/// Get the terminal content with styling information
+/// Get the terminal content with styling information (visible screen only)
 /// Returns a list of lines, where each line is a list of styled segments:
 /// ((text fg-color bg-color bold italic underline) ...)
 #[defun]
@@ -423,57 +438,87 @@ fn get_styled_content<'e>(env: &'e Env, term: &AlacrittyTerm) -> Result<Value<'e
     let mut lines_list = env.intern("nil")?;
 
     // Process lines in reverse order so we can build the list with cons
+    // Only process visible screen lines (0..screen_lines)
     for line_idx in (0..grid.screen_lines()).rev() {
         let row = &grid[Line(line_idx as i32)];
-        let mut segments_list = env.intern("nil")?;
+        let segments_list = build_line_segments(env, row, grid.columns())?;
+        lines_list = env.cons(segments_list, lines_list)?;
+    }
 
-        // Group consecutive cells with the same attributes
-        let mut current_text = String::new();
-        let mut current_fg: Option<(u8, u8, u8)> = None;
-        let mut current_bg: Option<(u8, u8, u8)> = None;
-        let mut current_flags: Option<CellFlags> = None;
+    Ok(lines_list)
+}
 
-        for col_idx in (0..grid.columns()).rev() {
-            let cell = &row[Column(col_idx)];
+/// Get the full terminal content including scrollback history with styling information
+/// Returns a list of lines, where each line is a list of styled segments:
+/// ((text fg-color bg-color bold italic underline) ...)
+/// Lines are returned from oldest (top of scrollback) to newest (bottom of screen)
+#[defun]
+fn get_full_styled_content<'e>(env: &'e Env, term: &AlacrittyTerm) -> Result<Value<'e>> {
+    let term_lock = term.term.lock();
+    let grid = term_lock.grid();
 
-            // Skip wide character spacer cells - they're placeholders for the
-            // second half of wide characters and shouldn't be rendered
-            if cell.flags.contains(CellFlags::WIDE_CHAR_SPACER) {
-                continue;
-            }
+    let mut lines_list = env.intern("nil")?;
 
-            let c = if cell.c == '\0' { ' ' } else { cell.c };
+    // Calculate the range of lines: from topmost (negative, oldest history) to bottommost (positive, visible)
+    let history_size = grid.total_lines().saturating_sub(grid.screen_lines());
+    let start_line = -(history_size as i32);
+    let end_line = grid.screen_lines() as i32;
 
-            let fg = color_to_rgb(&cell.fg);
-            let bg = color_to_rgb(&cell.bg);
-            let flags = cell.flags;
+    // Process lines in reverse order so we can build the list with cons
+    // Go from end_line-1 down to start_line
+    for line_idx in (start_line..end_line).rev() {
+        let row = &grid[Line(line_idx)];
+        let segments_list = build_line_segments(env, row, grid.columns())?;
+        lines_list = env.cons(segments_list, lines_list)?;
+    }
 
-            // Check if attributes changed
-            let attrs_match =
-                current_fg == Some(fg) && current_bg == Some(bg) && current_flags == Some(flags);
+    Ok(lines_list)
+}
 
-            if !attrs_match && !current_text.is_empty() {
-                // Emit current segment (text is reversed, so reverse it back)
-                let text: String = current_text.chars().rev().collect();
-                let segment = make_segment(
-                    env,
-                    &text,
-                    current_fg.unwrap(),
-                    current_bg.unwrap(),
-                    current_flags.unwrap(),
-                )?;
-                segments_list = env.cons(segment, segments_list)?;
-                current_text.clear();
-            }
+/// Get the number of scrollback (history) lines
+#[defun]
+fn history_size(term: &AlacrittyTerm) -> Result<i64> {
+    let term_lock = term.term.lock();
+    let grid = term_lock.grid();
+    let history = grid.total_lines().saturating_sub(grid.screen_lines());
+    Ok(history as i64)
+}
 
-            current_text.push(c);
-            current_fg = Some(fg);
-            current_bg = Some(bg);
-            current_flags = Some(flags);
+/// Helper to build segments for a single line
+fn build_line_segments<'e>(
+    env: &'e Env,
+    row: &alacritty_terminal::grid::Row<alacritty_terminal::term::cell::Cell>,
+    columns: usize,
+) -> Result<Value<'e>> {
+    let mut segments_list = env.intern("nil")?;
+
+    // Group consecutive cells with the same attributes
+    let mut current_text = String::new();
+    let mut current_fg: Option<(u8, u8, u8)> = None;
+    let mut current_bg: Option<(u8, u8, u8)> = None;
+    let mut current_flags: Option<CellFlags> = None;
+
+    for col_idx in (0..columns).rev() {
+        let cell = &row[Column(col_idx)];
+
+        // Skip wide character spacer cells - they're placeholders for the
+        // second half of wide characters and shouldn't be rendered
+        if cell.flags.contains(CellFlags::WIDE_CHAR_SPACER) {
+            continue;
         }
 
-        // Emit final segment for the line
-        if !current_text.is_empty() {
+        let c = if cell.c == '\0' { ' ' } else { cell.c };
+
+        let fg = color_to_rgb(&cell.fg);
+        let bg = color_to_rgb(&cell.bg);
+        let flags = cell.flags;
+
+        // Check if attributes changed
+        let attrs_match =
+            current_fg == Some(fg) && current_bg == Some(bg) && current_flags == Some(flags);
+
+        if !attrs_match && !current_text.is_empty() {
+            // Emit current segment (text is reversed, so reverse it back)
             let text: String = current_text.chars().rev().collect();
             let segment = make_segment(
                 env,
@@ -483,12 +528,29 @@ fn get_styled_content<'e>(env: &'e Env, term: &AlacrittyTerm) -> Result<Value<'e
                 current_flags.unwrap(),
             )?;
             segments_list = env.cons(segment, segments_list)?;
+            current_text.clear();
         }
 
-        lines_list = env.cons(segments_list, lines_list)?;
+        current_text.push(c);
+        current_fg = Some(fg);
+        current_bg = Some(bg);
+        current_flags = Some(flags);
     }
 
-    Ok(lines_list)
+    // Emit final segment for the line
+    if !current_text.is_empty() {
+        let text: String = current_text.chars().rev().collect();
+        let segment = make_segment(
+            env,
+            &text,
+            current_fg.unwrap(),
+            current_bg.unwrap(),
+            current_flags.unwrap(),
+        )?;
+        segments_list = env.cons(segment, segments_list)?;
+    }
+
+    Ok(segments_list)
 }
 
 /// Helper to create a segment: (text fg-color bg-color bold italic underline inverse)
@@ -539,17 +601,27 @@ fn make_segment<'e>(
 
 /// Check if a line wraps (has a fake newline at the end)
 /// Returns true if the line continues on the next line (i.e., should NOT have a real newline)
+/// Line index is 0-based from the start of the buffer (including scrollback)
+/// So line 0 is the first line of scrollback, and scrollback_size + screen_line is the visible area
 #[defun]
 fn line_wraps(term: &AlacrittyTerm, line: i64) -> Result<bool> {
     let term_lock = term.term.lock();
     let grid = term_lock.grid();
-    let line_idx = line as i32;
 
-    if line_idx < 0 || line_idx >= grid.screen_lines() as i32 {
+    // Convert buffer-relative line (0-based from top of scrollback) to grid Line
+    // Grid uses negative indices for scrollback: Line(-history_size) to Line(-1)
+    // And positive for visible: Line(0) to Line(screen_lines-1)
+    let history_size = grid.total_lines().saturating_sub(grid.screen_lines());
+    let grid_line = (line as i32) - (history_size as i32);
+
+    // Check bounds
+    let topmost = -(history_size as i32);
+    let bottommost = grid.screen_lines() as i32 - 1;
+    if grid_line < topmost || grid_line > bottommost {
         return Ok(false);
     }
 
-    let row = &grid[Line(line_idx)];
+    let row = &grid[Line(grid_line)];
     // Check if the last column has the WRAPLINE flag
     let last_col = grid.columns().saturating_sub(1);
     Ok(row[Column(last_col)].flags.contains(CellFlags::WRAPLINE))

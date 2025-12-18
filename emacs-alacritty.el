@@ -55,6 +55,8 @@
 (declare-function emacs-alacritty-cursor-blink "emacs-alacritty")
 (declare-function emacs-alacritty-is-dirty "emacs-alacritty")
 (declare-function emacs-alacritty-clear-dirty "emacs-alacritty")
+(declare-function emacs-alacritty-get-full-styled-content "emacs-alacritty")
+(declare-function emacs-alacritty-history-size "emacs-alacritty")
 
 ;; Load the dynamic module
 (defvar emacs-alacritty-module-path nil
@@ -358,6 +360,30 @@ Used for excluding prompts when copying.")
     (define-key map (kbd "q") #'emacs-alacritty-copy-mode)
     (define-key map (kbd "RET") #'emacs-alacritty-copy-mode-done)
     (define-key map (kbd "C-c C-t") #'emacs-alacritty-copy-mode)
+    ;; Navigation keys for scrolling through buffer
+    (define-key map (kbd "<prior>") #'scroll-down-command)
+    (define-key map (kbd "<next>") #'scroll-up-command)
+    (define-key map (kbd "C-v") #'scroll-up-command)
+    (define-key map (kbd "M-v") #'scroll-down-command)
+    (define-key map (kbd "<up>") #'previous-line)
+    (define-key map (kbd "<down>") #'next-line)
+    (define-key map (kbd "<left>") #'backward-char)
+    (define-key map (kbd "<right>") #'forward-char)
+    (define-key map (kbd "C-p") #'previous-line)
+    (define-key map (kbd "C-n") #'next-line)
+    (define-key map (kbd "C-b") #'backward-char)
+    (define-key map (kbd "C-f") #'forward-char)
+    (define-key map (kbd "C-a") #'beginning-of-line)
+    (define-key map (kbd "C-e") #'end-of-line)
+    (define-key map (kbd "M-<") #'beginning-of-buffer)
+    (define-key map (kbd "M->") #'end-of-buffer)
+    (define-key map (kbd "<home>") #'beginning-of-buffer)
+    (define-key map (kbd "<end>") #'end-of-buffer)
+    ;; Search
+    (define-key map (kbd "C-s") #'isearch-forward)
+    (define-key map (kbd "C-r") #'isearch-backward)
+    ;; Selection
+    (define-key map (kbd "C-SPC") #'set-mark-command)
     map)
   "Keymap for `emacs-alacritty-copy-mode'.")
 
@@ -404,8 +430,9 @@ Used for excluding prompts when copying.")
               (when (emacs-alacritty-is-dirty emacs-alacritty--term)
                 ;; Clear dirty flag before redrawing
                 (emacs-alacritty-clear-dirty emacs-alacritty--term)
-                ;; Update display with styled content
-                (let* ((styled-lines (emacs-alacritty-get-styled-content emacs-alacritty--term))
+                ;; Update display with full styled content (including scrollback)
+                (let* ((styled-lines (emacs-alacritty-get-full-styled-content emacs-alacritty--term))
+                       (history-size (emacs-alacritty-history-size emacs-alacritty--term))
                        (cursor-row (emacs-alacritty-cursor-row emacs-alacritty--term))
                        (cursor-col (emacs-alacritty-cursor-col emacs-alacritty--term))
                        (line-num 0)
@@ -416,6 +443,7 @@ Used for excluding prompts when copying.")
                     (dolist (segment line)
                       (emacs-alacritty--insert-styled-segment segment))
                     ;; Check if this line wraps (has a fake newline)
+                    ;; line-num is 0-indexed from start of buffer (including scrollback)
                     (when (emacs-alacritty-line-wraps emacs-alacritty--term line-num)
                       (push (1+ line-num) fake-newlines))  ; Store 1-indexed line number
                     (insert "\n")
@@ -423,10 +451,11 @@ Used for excluding prompts when copying.")
                   ;; Store fake newlines for copy mode
                   (setq emacs-alacritty--fake-newlines (nreverse fake-newlines))
                   ;; Position cursor
-                  ;; The terminal cursor position is in terms of terminal columns (0-indexed).
-                  ;; We need to translate this to buffer position accounting for character widths.
+                  ;; The terminal cursor position is relative to the visible screen (0-indexed).
+                  ;; In our buffer, visible lines start at history-size (0-indexed).
+                  ;; So buffer line = history-size + cursor-row
                   (goto-char (point-min))
-                  (forward-line cursor-row)
+                  (forward-line (+ history-size cursor-row))
                   (let ((line-end (line-end-position))
                         (target-col cursor-col)
                         (visual-col 0))
@@ -436,7 +465,10 @@ Used for excluding prompts when copying.")
                       (let* ((c (char-after))
                              (w (if c (char-width c) 1)))
                         (setq visual-col (+ visual-col w))
-                        (forward-char 1)))))))))
+                        (forward-char 1))))
+                  ;; Ensure cursor is visible - recenter if needed
+                  (let ((win-height (window-body-height)))
+                    (recenter (min cursor-row (1- win-height)))))))))
       (error
        (message "emacs-alacritty refresh error: %s" (error-message-string err))))))
 
@@ -761,7 +793,8 @@ a shell there using `emacs-alacritty-tramp-shells'."
       (with-current-buffer buffer
         (setq emacs-alacritty--term
               (emacs-alacritty-create (car size) (cdr size)
-                                      (emacs-alacritty--get-command)))
+                                      (emacs-alacritty--get-command)
+                                      emacs-alacritty-max-scrollback))
         ;; Start refresh timer
         (setq emacs-alacritty--timer
               (run-with-timer 0.1 emacs-alacritty-timer-interval
@@ -789,7 +822,8 @@ a shell there using `emacs-alacritty-tramp-shells'."
       (with-current-buffer buffer
         (setq emacs-alacritty--term
               (emacs-alacritty-create (car size) (cdr size)
-                                      (emacs-alacritty--get-command)))
+                                      (emacs-alacritty--get-command)
+                                      emacs-alacritty-max-scrollback))
         ;; Start refresh timer
         (setq emacs-alacritty--timer
               (run-with-timer 0.1 emacs-alacritty-timer-interval
@@ -1064,7 +1098,8 @@ if `emacs-alacritty-bookmark-check-dir' is non-nil."
         (let ((size (emacs-alacritty--get-window-size)))
           (setq emacs-alacritty--term
                 (emacs-alacritty-create (car size) (cdr size)
-                                        (emacs-alacritty--get-command)))
+                                        (emacs-alacritty--get-command)
+                                        emacs-alacritty-max-scrollback))
           (setq emacs-alacritty--timer
                 (run-with-timer 0.1 emacs-alacritty-timer-interval
                                 (let ((buffer buf))
