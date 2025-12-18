@@ -166,6 +166,9 @@ received from the terminal and FUNCTION is the Emacs function to call."
 (defvar-local emacs-alacritty--title ""
   "Current terminal title.")
 
+(defvar-local emacs-alacritty--directory-from-title nil
+  "Whether directory was set from title (for tracking purposes).")
+
 (defvar-local emacs-alacritty--copy-mode nil
   "Whether copy mode is enabled.")
 
@@ -365,6 +368,51 @@ SEGMENT is (text fg-color bg-color bold italic underline inverse)."
     (when face-attrs
       (add-face-text-property start (point) (nreverse face-attrs)))))
 
+(defun emacs-alacritty--parse-title-for-directory (title)
+  "Parse TITLE for directory information.
+Expected format: user@host:path or host:path.
+Returns (user host path) or nil if not parseable."
+  (when (and title (stringp title))
+    (cond
+     ;; Format: user@host:path
+     ((string-match "^\\([^@]+\\)@\\([^:]+\\):\\(.+\\)$" title)
+      (list (match-string 1 title)
+            (match-string 2 title)
+            (match-string 3 title)))
+     ;; Format: host:path (no user)
+     ((string-match "^\\([^:]+\\):\\(.+\\)$" title)
+      (list nil
+            (match-string 1 title)
+            (match-string 2 title))))))
+
+(defun emacs-alacritty--set-directory (user host path)
+  "Set `default-directory' based on USER, HOST, and PATH.
+Handles TRAMP for remote hosts."
+  (when path
+    (let ((dir (emacs-alacritty--get-directory-from-remote user host path)))
+      (when (and dir (file-directory-p dir))
+        (setq default-directory dir)))))
+
+(defun emacs-alacritty--get-directory-from-remote (user host path)
+  "Construct directory from USER, HOST, and PATH.
+Returns a local path or TRAMP path as appropriate."
+  (let ((local-host-p (or (null host)
+                          (string= host "")
+                          (string= host "localhost")
+                          (string= host (system-name))
+                          (string= host (car (split-string (system-name) "\\.")))))
+        (expanded-path (if (string-prefix-p "~" path)
+                           (expand-file-name path)
+                         path)))
+    (if local-host-p
+        ;; Local path
+        (file-name-as-directory expanded-path)
+      ;; Remote path via TRAMP
+      (let ((tramp-path (if user
+                            (format "/%s@%s:%s" user host expanded-path)
+                          (format "/%s:%s" host expanded-path))))
+        (file-name-as-directory tramp-path)))))
+
 (defun emacs-alacritty--process-events ()
   "Process pending terminal events."
   (when emacs-alacritty--term
@@ -372,8 +420,12 @@ SEGMENT is (text fg-color bg-color bold italic underline inverse)."
       (dolist (event events)
         (pcase (car event)
           ('title
-           (setq emacs-alacritty--title (cdr event))
-           (emacs-alacritty--update-buffer-name))
+           (let ((title (cdr event)))
+             (setq emacs-alacritty--title title)
+             (emacs-alacritty--update-buffer-name)
+             ;; Parse title for directory information
+             (when-let ((dir-info (emacs-alacritty--parse-title-for-directory title)))
+               (apply #'emacs-alacritty--set-directory dir-info))))
           ('bell
            (ding))
           ('exit

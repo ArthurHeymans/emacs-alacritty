@@ -47,7 +47,7 @@ if [[ "$INSIDE_EMACS" = 'alacritty' ]]; then
     # Also run on prompt display
     precmd() {
         alacritty_prompt_end
-        # Set title to current directory
-        print -Pn "\e]0;%m:%~\a"
+        # Set title to user@host:path for directory tracking
+        print -Pn "\e]0;%n@%m:%~\a"
     }
 fi

@@ -25,10 +25,13 @@ end
 # This is to change the title of the buffer based on information provided by the
 # shell. See, http://tldp.org/HOWTO/Xterm-Title-4.html, for the meaning of the
 # various symbols.
+# Format: user@host:path - this allows emacs-alacritty to track the directory
 function fish_title
+    whoami
+    echo "@"
     hostname
     echo ":"
-    prompt_pwd
+    pwd
 end
 
 # With alacritty_cmd you can execute Emacs commands directly from the shell.

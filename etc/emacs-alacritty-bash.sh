@@ -39,14 +39,11 @@ alacritty_cmd() {
 # This is to change the title of the buffer based on information provided by the
 # shell. See, http://tldp.org/HOWTO/Xterm-Title-4.html, for the meaning of the
 # various symbols.
-PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND; }"'echo -ne "\033]0;${HOSTNAME}:${PWD}\007"'
+# Format: user@host:path - this allows emacs-alacritty to track the directory
+PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND; }"'echo -ne "\033]0;$(whoami)@${HOSTNAME}:${PWD}\007"'
 
-# Sync directory and host in the shell with Emacs's current directory.
-# You may need to manually specify the hostname instead of $(hostname) in case
-# $(hostname) does not return the correct string to connect to the server.
-#
-# The escape sequence "51;A" has also the role of identifying the end of the
-# prompt
+# Note: Directory tracking is done via the title (OSC 0) which includes user@host:path
+# The OSC 51;A sequence is kept for compatibility but may not work with all terminal backends
 alacritty_prompt_end(){
     alacritty_printf "51;A$(whoami)@$(hostname):$(pwd)"
 }
