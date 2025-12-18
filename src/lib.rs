@@ -241,6 +241,10 @@ impl AlacrittyTerm {
             let mut line_str = String::new();
             for col_idx in 0..grid.columns() {
                 let cell = &row[Column(col_idx)];
+                // Skip wide character spacer cells
+                if cell.flags.contains(CellFlags::WIDE_CHAR_SPACER) {
+                    continue;
+                }
                 let c = cell.c;
                 // Replace null chars with spaces for display
                 if c == '\0' || c == ' ' {
@@ -404,6 +408,13 @@ fn get_styled_content<'e>(env: &'e Env, term: &AlacrittyTerm) -> Result<Value<'e
 
         for col_idx in (0..grid.columns()).rev() {
             let cell = &row[Column(col_idx)];
+            
+            // Skip wide character spacer cells - they're placeholders for the
+            // second half of wide characters and shouldn't be rendered
+            if cell.flags.contains(CellFlags::WIDE_CHAR_SPACER) {
+                continue;
+            }
+            
             let c = if cell.c == '\0' { ' ' } else { cell.c };
 
             let fg = color_to_rgb(&cell.fg);
@@ -616,7 +627,12 @@ fn get_line(term: &AlacrittyTerm, line: i64) -> Result<String> {
     let row = &grid[Line(line_idx)];
     let mut result = String::new();
     for col in 0..grid.columns() {
-        let c = row[Column(col)].c;
+        let cell = &row[Column(col)];
+        // Skip wide character spacer cells
+        if cell.flags.contains(CellFlags::WIDE_CHAR_SPACER) {
+            continue;
+        }
+        let c = cell.c;
         if c == '\0' {
             result.push(' ');
         } else {

@@ -308,12 +308,23 @@ received from the terminal and FUNCTION is the Emacs function to call."
                 (emacs-alacritty--insert-styled-segment segment))
               (insert "\n"))
             ;; Position cursor
+            ;; The terminal cursor position is in terms of terminal columns (0-indexed).
+            ;; We need to translate this to buffer position accounting for character widths.
             (goto-char (point-min))
             (forward-line cursor-row)
-            (let ((line-end (line-end-position)))
-              (move-to-column cursor-col)
-              (when (> (point) line-end)
-                (goto-char line-end)))))
+            (let ((line-end (line-end-position))
+                  (target-col cursor-col)
+                  (visual-col 0))
+              ;; Move forward character by character, tracking visual column
+              (while (and (< (point) line-end)
+                          (< visual-col target-col))
+                (let* ((c (char-after))
+                       (w (if c (char-width c) 1)))
+                  (setq visual-col (+ visual-col w))
+                  (forward-char 1)))
+              ;; If we overshot due to a wide char, stay where we are
+              ;; (cursor will be at the start of the wide char)
+              )))
       (error
        (message "emacs-alacritty refresh error: %s" (error-message-string err))))))
 
