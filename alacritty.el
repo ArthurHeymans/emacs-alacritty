@@ -159,29 +159,53 @@ Example: \"--features some-feature\""
   "Check if cargo is available in PATH."
   (executable-find "cargo"))
 
+(defun alacritty--nix-is-available ()
+  "Check if nix-shell is available in PATH."
+  (executable-find "nix-shell"))
+
+(defun alacritty--shell-nix-exists ()
+  "Check if shell.nix exists in the source directory."
+  (let ((dir (alacritty--get-module-dir)))
+    (file-exists-p (expand-file-name "shell.nix" dir))))
+
 (defun alacritty-module-compile ()
-  "Compile the alacritty module using cargo."
+  "Compile the alacritty module using cargo.
+If nix-shell is available and shell.nix exists in the source directory,
+the build will run inside nix-shell to ensure all dependencies are available.
+This is particularly useful on NixOS where cargo may not be in PATH."
   (interactive)
-  (unless (alacritty--cargo-is-available)
-    (error "Cargo not found.  Please install Rust and Cargo first"))
   (let* ((alacritty-directory (expand-file-name (alacritty--get-module-dir)))
-         (cargo-args (concat
-                      (if alacritty-compile-release "--release " "")
-                      alacritty-cargo-args))
-         (make-commands
-          (format "cd %s && cargo build %s"
-                  (shell-quote-argument alacritty-directory)
-                  cargo-args))
-         (buffer (get-buffer-create alacritty-install-buffer-name)))
+         (use-nix (and (alacritty--nix-is-available)
+                       (alacritty--shell-nix-exists)))
+         (cargo-available (alacritty--cargo-is-available)))
+    ;; Check that we have a way to build
+    (unless (or use-nix cargo-available)
+      (error "Neither cargo nor nix-shell found.  Please install Rust/Cargo or Nix"))
     ;; Verify Cargo.toml exists before attempting to build
     (unless (file-exists-p (expand-file-name "Cargo.toml" alacritty-directory))
       (error "Cargo.toml not found in %s.  Set `alacritty-source-dir' to the source directory" alacritty-directory))
-    (pop-to-buffer buffer)
-    (compilation-mode)
-    (if (zerop (let ((inhibit-read-only t))
-                 (call-process "sh" nil buffer t "-c" make-commands)))
-        (message "Compilation of `alacritty' module succeeded")
-      (error "Compilation of `alacritty' module failed!"))))
+    (let* ((cargo-args (concat
+                        (if alacritty-compile-release "--release " "")
+                        alacritty-cargo-args))
+           (cargo-cmd (format "cargo build %s" cargo-args))
+           (make-commands
+            (if use-nix
+                (format "cd %s && nix-shell --run %s"
+                        (shell-quote-argument alacritty-directory)
+                        (shell-quote-argument cargo-cmd))
+              (format "cd %s && %s"
+                      (shell-quote-argument alacritty-directory)
+                      cargo-cmd)))
+           (buffer (get-buffer-create alacritty-install-buffer-name)))
+      (pop-to-buffer buffer)
+      (compilation-mode)
+      (when use-nix
+        (let ((inhibit-read-only t))
+          (insert "Using nix-shell for build environment...\n\n")))
+      (if (zerop (let ((inhibit-read-only t))
+                   (call-process "sh" nil buffer t "-c" make-commands)))
+          (message "Compilation of `alacritty' module succeeded")
+        (error "Compilation of `alacritty' module failed!")))))
 
 (defcustom alacritty-shell (or (getenv "SHELL") "/bin/sh")
   "Shell to run in the terminal."
