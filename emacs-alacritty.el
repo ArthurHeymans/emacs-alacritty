@@ -73,20 +73,32 @@
       default-directory))
 
 (defun emacs-alacritty--find-module ()
-  "Find the emacs-alacritty dynamic module."
+  "Find the emacs-alacritty dynamic module.
+Returns the path to the module if found, or nil if not found."
   (let* ((dir (emacs-alacritty--get-module-dir))
          (release-path (expand-file-name "target/release/libemacs_alacritty.so" dir))
          (debug-path (expand-file-name "target/debug/libemacs_alacritty.so" dir)))
     (cond
      ((file-exists-p release-path) release-path)
      ((file-exists-p debug-path) debug-path)
-     (t (error "emacs-alacritty module not found in %s. Please build it first with 'cargo build --release'" dir)))))
+     (t nil))))
 
 (defun emacs-alacritty--load-module ()
-  "Load the emacs-alacritty dynamic module."
+  "Load the emacs-alacritty dynamic module.
+If the module is not found, offers to compile it."
   (unless emacs-alacritty-module-loaded
     (let ((module-path (or emacs-alacritty-module-path
                            (emacs-alacritty--find-module))))
+      (unless module-path
+        ;; Module not found, offer to compile
+        (if (or emacs-alacritty-always-compile-module
+                (y-or-n-p "emacs-alacritty module not found.  Compile it now? "))
+            (progn
+              (emacs-alacritty-module-compile)
+              (setq module-path (emacs-alacritty--find-module))
+              (unless module-path
+                (error "Compilation succeeded but module still not found")))
+          (error "emacs-alacritty will not work until the module is compiled")))
       (module-load module-path)
       (setq emacs-alacritty-module-loaded t))))
 
@@ -95,6 +107,54 @@
 (defgroup emacs-alacritty nil
   "Alacritty terminal emulator for Emacs."
   :group 'terminals)
+
+;; Module compilation options
+
+(defcustom emacs-alacritty-always-compile-module nil
+  "If non-nil, automatically compile the module without prompting.
+When nil, the user is prompted before compilation."
+  :type 'boolean
+  :group 'emacs-alacritty)
+
+(defcustom emacs-alacritty-compile-release t
+  "If non-nil, compile in release mode (optimized).
+If nil, compile in debug mode (faster compilation, slower runtime)."
+  :type 'boolean
+  :group 'emacs-alacritty)
+
+(defcustom emacs-alacritty-cargo-args ""
+  "Additional arguments to pass to cargo when building the module.
+Example: \"--features some-feature\""
+  :type 'string
+  :group 'emacs-alacritty)
+
+(defvar emacs-alacritty-install-buffer-name " *Install emacs-alacritty* "
+  "Name of the buffer used for compiling emacs-alacritty.")
+
+(defun emacs-alacritty--cargo-is-available ()
+  "Check if cargo is available in PATH."
+  (executable-find "cargo"))
+
+(defun emacs-alacritty-module-compile ()
+  "Compile the emacs-alacritty module using cargo."
+  (interactive)
+  (unless (emacs-alacritty--cargo-is-available)
+    (error "Cargo not found.  Please install Rust and Cargo first"))
+  (let* ((emacs-alacritty-directory (emacs-alacritty--get-module-dir))
+         (cargo-args (concat
+                      (if emacs-alacritty-compile-release "--release " "")
+                      emacs-alacritty-cargo-args))
+         (make-commands
+          (format "cd %s && cargo build %s"
+                  (shell-quote-argument emacs-alacritty-directory)
+                  cargo-args))
+         (buffer (get-buffer-create emacs-alacritty-install-buffer-name)))
+    (pop-to-buffer buffer)
+    (compilation-mode)
+    (if (zerop (let ((inhibit-read-only t))
+                 (call-process "sh" nil buffer t "-c" make-commands)))
+        (message "Compilation of `emacs-alacritty' module succeeded")
+      (error "Compilation of `emacs-alacritty' module failed!"))))
 
 (defcustom emacs-alacritty-shell (or (getenv "SHELL") "/bin/sh")
   "Shell to run in the terminal."
