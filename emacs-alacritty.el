@@ -186,6 +186,24 @@ You can use `M-x blink-cursor-mode' to toggle manually."
   :type 'boolean
   :group 'emacs-alacritty)
 
+(defcustom emacs-alacritty-exit-functions nil
+  "List of functions called when the terminal process exits.
+Each function is called with two arguments: the emacs-alacritty
+buffer of the process (if still live), and a string describing
+the exit event.
+
+This can be used to perform cleanup, log exit events, or customize
+behavior when terminals close.
+
+Example:
+  (add-hook \\='emacs-alacritty-exit-functions
+            (lambda (buffer event)
+              (message \"Terminal %s exited: %s\"
+                       (if buffer (buffer-name buffer) \"<killed>\")
+                       event)))"
+  :type 'hook
+  :group 'emacs-alacritty)
+
 ;; Faces for terminal colors
 
 (defface emacs-alacritty-color-black
@@ -377,51 +395,48 @@ Used for excluding prompts when copying.")
           ;; Process any pending events (this also updates the dirty flag)
           (emacs-alacritty--process-events)
           
-          ;; Check if terminal has exited
-          (when (emacs-alacritty-is-exited emacs-alacritty--term)
-            (emacs-alacritty--handle-exit)
-            (cl-return-from emacs-alacritty--refresh))
-          
-          ;; Only redraw if terminal content has changed
-          (when (emacs-alacritty-is-dirty emacs-alacritty--term)
-            ;; Clear dirty flag before redrawing
-            (emacs-alacritty-clear-dirty emacs-alacritty--term)
-            ;; Update display with styled content
-            (let* ((styled-lines (emacs-alacritty-get-styled-content emacs-alacritty--term))
-                   (cursor-row (emacs-alacritty-cursor-row emacs-alacritty--term))
-                   (cursor-col (emacs-alacritty-cursor-col emacs-alacritty--term))
-                   (line-num 0)
-                   (fake-newlines nil))
-              (erase-buffer)
-              ;; Insert styled content and track fake newlines
-              (dolist (line styled-lines)
-                (dolist (segment line)
-                  (emacs-alacritty--insert-styled-segment segment))
-                ;; Check if this line wraps (has a fake newline)
-                (when (emacs-alacritty-line-wraps emacs-alacritty--term line-num)
-                  (push (1+ line-num) fake-newlines))  ; Store 1-indexed line number
-                (insert "\n")
-                (setq line-num (1+ line-num)))
-              ;; Store fake newlines for copy mode
-              (setq emacs-alacritty--fake-newlines (nreverse fake-newlines))
-              ;; Position cursor
-              ;; The terminal cursor position is in terms of terminal columns (0-indexed).
-              ;; We need to translate this to buffer position accounting for character widths.
-              (goto-char (point-min))
-              (forward-line cursor-row)
-              (let ((line-end (line-end-position))
-                    (target-col cursor-col)
-                    (visual-col 0))
-                ;; Move forward character by character, tracking visual column
-                (while (and (< (point) line-end)
-                            (< visual-col target-col))
-                  (let* ((c (char-after))
-                         (w (if c (char-width c) 1)))
-                    (setq visual-col (+ visual-col w))
-                    (forward-char 1)))
-                ;; If we overshot due to a wide char, stay where we are
-                ;; (cursor will be at the start of the wide char)
-                ))))
+          ;; Check if term is still valid (may have been cleared by exit event)
+          (when emacs-alacritty--term
+            ;; Check if terminal has exited (in case exit wasn't delivered as event)
+            (if (emacs-alacritty-is-exited emacs-alacritty--term)
+                (emacs-alacritty--handle-exit)
+              ;; Only redraw if terminal content has changed
+              (when (emacs-alacritty-is-dirty emacs-alacritty--term)
+                ;; Clear dirty flag before redrawing
+                (emacs-alacritty-clear-dirty emacs-alacritty--term)
+                ;; Update display with styled content
+                (let* ((styled-lines (emacs-alacritty-get-styled-content emacs-alacritty--term))
+                       (cursor-row (emacs-alacritty-cursor-row emacs-alacritty--term))
+                       (cursor-col (emacs-alacritty-cursor-col emacs-alacritty--term))
+                       (line-num 0)
+                       (fake-newlines nil))
+                  (erase-buffer)
+                  ;; Insert styled content and track fake newlines
+                  (dolist (line styled-lines)
+                    (dolist (segment line)
+                      (emacs-alacritty--insert-styled-segment segment))
+                    ;; Check if this line wraps (has a fake newline)
+                    (when (emacs-alacritty-line-wraps emacs-alacritty--term line-num)
+                      (push (1+ line-num) fake-newlines))  ; Store 1-indexed line number
+                    (insert "\n")
+                    (setq line-num (1+ line-num)))
+                  ;; Store fake newlines for copy mode
+                  (setq emacs-alacritty--fake-newlines (nreverse fake-newlines))
+                  ;; Position cursor
+                  ;; The terminal cursor position is in terms of terminal columns (0-indexed).
+                  ;; We need to translate this to buffer position accounting for character widths.
+                  (goto-char (point-min))
+                  (forward-line cursor-row)
+                  (let ((line-end (line-end-position))
+                        (target-col cursor-col)
+                        (visual-col 0))
+                    ;; Move forward character by character, tracking visual column
+                    (while (and (< (point) line-end)
+                                (< visual-col target-col))
+                      (let* ((c (char-after))
+                             (w (if c (char-width c) 1)))
+                        (setq visual-col (+ visual-col w))
+                        (forward-char 1)))))))))
       (error
        (message "emacs-alacritty refresh error: %s" (error-message-string err))))))
 
@@ -688,14 +703,23 @@ For local directories, returns a command to cd to the directory and start the sh
 
 (defun emacs-alacritty--handle-exit ()
   "Handle terminal process exit."
+  ;; Cancel timer first to prevent further refresh attempts
   (when emacs-alacritty--timer
     (cancel-timer emacs-alacritty--timer)
     (setq emacs-alacritty--timer nil))
-  (if emacs-alacritty-kill-buffer-on-exit
-      (kill-buffer (current-buffer))
-    (let ((inhibit-read-only t))
-      (goto-char (point-max))
-      (insert "\n\nProcess exited.\n"))))
+  ;; Clear the term pointer to prevent access to freed resources
+  (let ((buf (current-buffer))
+        (event "finished"))
+    (setq emacs-alacritty--term nil)
+    ;; Run exit hook before potentially killing the buffer
+    (run-hook-with-args 'emacs-alacritty-exit-functions
+                        (if (buffer-live-p buf) buf nil)
+                        event)
+    (if emacs-alacritty-kill-buffer-on-exit
+        (kill-buffer buf)
+      (let ((inhibit-read-only t))
+        (goto-char (point-max))
+        (insert "\n\nProcess exited.\n")))))
 
 (defun emacs-alacritty--update-buffer-name ()
   "Update the buffer name based on the terminal title."
