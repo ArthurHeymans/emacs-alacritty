@@ -72,13 +72,27 @@ This handles package managers like straight.el that separate source and build di
               repos-dir
             dir))))))
 
+(defun alacritty--module-filename ()
+  "Return the platform-specific module filename."
+  (cond
+   ((eq system-type 'darwin) "libalacritty_emacs.dylib")
+   ((eq system-type 'windows-nt) "alacritty_emacs.dll")
+   (t "libalacritty_emacs.so")))
+
 (defun alacritty--find-module ()
   "Find the alacritty dynamic module.
-Returns the path to the module if found, or nil if not found."
-  (let* ((dir (alacritty--get-module-dir))
-         (release-path (expand-file-name "target/release/libalacritty_emacs.so" dir))
-         (debug-path (expand-file-name "target/debug/libalacritty_emacs.so" dir)))
+Returns the path to the module if found, or nil if not found.
+Searches in `alacritty-module-build-dir' first, then falls back to
+the source directory's target folder for backwards compatibility."
+  (let* ((module-name (alacritty--module-filename))
+         ;; Check the configured build directory first
+         (build-dir-path (expand-file-name module-name alacritty-module-build-dir))
+         ;; Fall back to source directory for backwards compatibility
+         (source-dir (alacritty--get-module-dir))
+         (release-path (expand-file-name (concat "target/release/" module-name) source-dir))
+         (debug-path (expand-file-name (concat "target/debug/" module-name) source-dir)))
     (cond
+     ((file-exists-p build-dir-path) build-dir-path)
      ((file-exists-p release-path) release-path)
      ((file-exists-p debug-path) debug-path)
      (t nil))))
@@ -138,6 +152,13 @@ for example when using package managers that separate source and build directori
                  (directory :tag "Source directory"))
   :group 'alacritty)
 
+(defcustom alacritty-module-build-dir
+  (expand-file-name "alacritty" user-emacs-directory)
+  "Directory where the compiled module will be stored.
+The compiled dynamic module will be placed in this directory."
+  :type 'directory
+  :group 'alacritty)
+
 (defcustom alacritty-always-compile-module nil
   "If non-nil, automatically compile the module without prompting.
 When nil, the user is prompted before compilation."
@@ -164,18 +185,25 @@ Example: \"--features some-feature\""
   (executable-find "cargo"))
 
 (defun alacritty-module-compile ()
-  "Compile the alacritty module using cargo."
+  "Compile the alacritty module using cargo.
+The compiled module is placed in `alacritty-module-build-dir'."
   (interactive)
   (unless (alacritty--cargo-is-available)
     (error "Cargo not found.  Please install Rust and Cargo first"))
   (let* ((alacritty-directory (expand-file-name (alacritty--get-module-dir)))
+         (build-dir (expand-file-name alacritty-module-build-dir))
+         (module-name (alacritty--module-filename))
          (cargo-args (concat
                       (if alacritty-compile-release "--release " "")
                       alacritty-cargo-args))
+         (target-subdir (if alacritty-compile-release "release" "debug"))
          (make-commands
-          (format "cd %s && cargo build %s"
+          (format "cd %s && cargo build %s && mkdir -p %s && cp %s %s"
                   (shell-quote-argument alacritty-directory)
-                  cargo-args))
+                  cargo-args
+                  (shell-quote-argument build-dir)
+                  (shell-quote-argument (concat "target/" target-subdir "/" module-name))
+                  (shell-quote-argument build-dir)))
          (buffer (get-buffer-create alacritty-install-buffer-name)))
     ;; Verify Cargo.toml exists before attempting to build
     (unless (file-exists-p (expand-file-name "Cargo.toml" alacritty-directory))
@@ -184,7 +212,7 @@ Example: \"--features some-feature\""
     (compilation-mode)
     (if (zerop (let ((inhibit-read-only t))
                  (call-process "sh" nil buffer t "-c" make-commands)))
-        (message "Compilation of `alacritty' module succeeded")
+        (message "Compilation of `alacritty' module succeeded. Module installed to %s" build-dir)
       (error "Compilation of `alacritty' module failed!"))))
 
 (defcustom alacritty-shell (or (getenv "SHELL") "/bin/sh")
