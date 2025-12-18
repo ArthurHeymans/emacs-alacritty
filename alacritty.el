@@ -152,12 +152,38 @@ Example: \"--features some-feature\""
   :type 'string
   :group 'alacritty)
 
+(defcustom alacritty-refresh-rustup-toolchain nil
+  "If non-nil, reinstall the rustup toolchain before compiling.
+This can fix linker errors on NixOS when rustup's toolchain has stale
+references to Nix store paths.  Set to the toolchain name (e.g., \"nightly\"
+or \"stable\") to enable."
+  :type '(choice (const :tag "Disabled" nil)
+                 (string :tag "Toolchain name"))
+  :group 'alacritty)
+
 (defvar alacritty-install-buffer-name " *Install alacritty* "
   "Name of the buffer used for compiling alacritty.")
 
 (defun alacritty--cargo-is-available ()
   "Check if cargo is available in PATH."
   (executable-find "cargo"))
+
+(defun alacritty--refresh-rustup-toolchain ()
+  "Reinstall the rustup toolchain specified by `alacritty-refresh-rustup-toolchain'.
+This fixes linker issues on NixOS where rustup's toolchain has stale Nix store references."
+  (when alacritty-refresh-rustup-toolchain
+    (let ((toolchain alacritty-refresh-rustup-toolchain)
+          (buffer (get-buffer-create alacritty-install-buffer-name)))
+      (message "Refreshing rustup toolchain %s..." toolchain)
+      (let ((inhibit-read-only t))
+        (with-current-buffer buffer
+          (goto-char (point-max))
+          (insert (format "\n=== Refreshing rustup toolchain %s ===\n" toolchain))))
+      (unless (zerop (call-process "rustup" nil buffer t "toolchain" "uninstall" toolchain))
+        (message "Warning: Failed to uninstall toolchain %s (may not exist)" toolchain))
+      (unless (zerop (call-process "rustup" nil buffer t "toolchain" "install" toolchain))
+        (error "Failed to install rustup toolchain %s" toolchain))
+      (message "Rustup toolchain %s refreshed" toolchain))))
 
 (defun alacritty-module-compile ()
   "Compile the alacritty module using cargo."
@@ -178,6 +204,8 @@ Example: \"--features some-feature\""
       (error "Cargo.toml not found in %s.  Set `alacritty-source-dir' to the source directory" alacritty-directory))
     (pop-to-buffer buffer)
     (compilation-mode)
+    ;; Refresh rustup toolchain if configured (fixes NixOS linker issues)
+    (alacritty--refresh-rustup-toolchain)
     (if (zerop (let ((inhibit-read-only t))
                  (call-process "sh" nil buffer t "-c" make-commands)))
         (message "Compilation of `alacritty' module succeeded")
