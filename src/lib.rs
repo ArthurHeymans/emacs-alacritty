@@ -1,31 +1,353 @@
-use emacs::{defun, Env, Result};
-use alacritty_terminal::term::{Term, Config};
+//! Emacs Alacritty Terminal - Terminal emulator for Emacs using alacritty_terminal
+//!
+//! This module provides a terminal emulator for Emacs using the alacritty_terminal
+//! library, similar to emacs-libvterm but using Alacritty's terminal emulation.
+
+use alacritty_terminal::event::{Event, EventListener, WindowSize};
+use alacritty_terminal::event_loop::{EventLoop, Msg, Notifier};
 use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::event::{Event, EventListener};
-use alacritty_terminal::vte::ansi::Processor;
+use alacritty_terminal::index::{Column, Line};
+use alacritty_terminal::sync::FairMutex;
+use alacritty_terminal::term::cell::Flags as CellFlags;
+use alacritty_terminal::term::{Config, Term, TermMode};
+use alacritty_terminal::tty::{self, Options as PtyOptions, Shell};
+use alacritty_terminal::vte::ansi::{Color, NamedColor};
+use emacs::{defun, Env, IntoLisp, Result, Value};
+use parking_lot::Mutex;
+use std::borrow::Cow;
+use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Arc;
 
 emacs::plugin_is_GPL_compatible!();
 
-#[derive(Clone)]
-struct NoopEventListener;
-impl EventListener for NoopEventListener {
-    fn send_event(&self, _event: Event) {}
-}
-
-struct TermDimensions {
+/// Terminal dimensions
+#[derive(Clone, Copy)]
+struct TermSize {
     cols: usize,
     lines: usize,
+    cell_width: u16,
+    cell_height: u16,
 }
 
-impl Dimensions for TermDimensions {
-    fn columns(&self) -> usize { self.cols }
-    fn screen_lines(&self) -> usize { self.lines }
-    fn total_lines(&self) -> usize { self.lines }
+impl TermSize {
+    fn new(cols: usize, lines: usize) -> Self {
+        Self {
+            cols,
+            lines,
+            cell_width: 10,  // Default cell width in pixels
+            cell_height: 20, // Default cell height in pixels
+        }
+    }
 }
 
-struct AlacrittyTerm {
-    term: Term<NoopEventListener>,
-    processor: Processor,
+impl Dimensions for TermSize {
+    fn columns(&self) -> usize {
+        self.cols
+    }
+    fn screen_lines(&self) -> usize {
+        self.lines
+    }
+    fn total_lines(&self) -> usize {
+        self.lines
+    }
+}
+
+impl From<TermSize> for WindowSize {
+    fn from(size: TermSize) -> Self {
+        WindowSize {
+            num_cols: size.cols as u16,
+            num_lines: size.lines as u16,
+            cell_width: size.cell_width,
+            cell_height: size.cell_height,
+        }
+    }
+}
+
+/// Events sent from the terminal to Emacs
+#[derive(Debug, Clone)]
+pub enum TermEvent {
+    Title(String),
+    Bell,
+    Exit,
+    ClipboardStore(String),
+    ClipboardLoad,
+    ColorRequest(usize),
+    CursorBlinkingChange,
+    Wakeup,
+}
+
+/// Event listener that collects events to be processed by Emacs
+/// and writes PTY responses back immediately
+#[derive(Clone)]
+struct EmacEventListener {
+    sender: Sender<TermEvent>,
+    pty_writer: Sender<Msg>,
+}
+
+impl EmacEventListener {
+    fn new(sender: Sender<TermEvent>, pty_writer: Sender<Msg>) -> Self {
+        Self { sender, pty_writer }
+    }
+}
+
+impl EventListener for EmacEventListener {
+    fn send_event(&self, event: Event) {
+        match event {
+            Event::Title(title) => {
+                let _ = self.sender.send(TermEvent::Title(title));
+            }
+            Event::Bell => {
+                let _ = self.sender.send(TermEvent::Bell);
+            }
+            Event::Exit => {
+                let _ = self.sender.send(TermEvent::Exit);
+            }
+            Event::ClipboardStore(_, data) => {
+                let _ = self.sender.send(TermEvent::ClipboardStore(data));
+            }
+            Event::ClipboardLoad(_, _) => {
+                let _ = self.sender.send(TermEvent::ClipboardLoad);
+            }
+            Event::ColorRequest(idx, _) => {
+                let _ = self.sender.send(TermEvent::ColorRequest(idx));
+            }
+            Event::PtyWrite(data) => {
+                // Write PTY responses (like DA1 response) immediately back to PTY
+                let _ = self.pty_writer.send(Msg::Input(Cow::Owned(data.into_bytes())));
+            }
+            Event::CursorBlinkingChange => {
+                let _ = self.sender.send(TermEvent::CursorBlinkingChange);
+            }
+            Event::Wakeup => {
+                let _ = self.sender.send(TermEvent::Wakeup);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The main terminal structure holding all terminal state
+pub struct AlacrittyTerm {
+    term: Arc<FairMutex<Term<EmacEventListener>>>,
+    pty_tx: Notifier,
+    event_rx: Receiver<TermEvent>,
+    size: Mutex<TermSize>,
+    title: Mutex<String>,
+    exited: Mutex<bool>,
+}
+
+impl AlacrittyTerm {
+    fn new(cols: usize, lines: usize, shell: Option<String>) -> std::result::Result<Self, String> {
+        let size = TermSize::new(cols, lines);
+        let (event_tx, event_rx) = channel();
+        
+        // Setup PTY options
+        let shell_program = shell.unwrap_or_else(|| {
+            std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
+        });
+
+        let pty_config = PtyOptions {
+            shell: Some(Shell::new(shell_program, vec![])),
+            working_directory: None,
+            ..Default::default()
+        };
+
+        // Create the PTY first
+        let window_size = WindowSize::from(size);
+        let pty = tty::new(&pty_config, window_size, 0)
+            .map_err(|e| format!("Failed to create PTY: {}", e))?;
+
+        // We need to create a dummy event listener first, then update it
+        // Actually, let's use a channel-based approach where we forward PTY writes
+        let (pty_write_tx, pty_write_rx) = channel::<Msg>();
+        
+        // Create the event listener with the PTY write channel
+        let event_listener = EmacEventListener::new(event_tx, pty_write_tx);
+
+        // Create the terminal
+        let config = Config::default();
+        let term = Term::new(config, &size, event_listener.clone());
+        let term = Arc::new(FairMutex::new(term));
+
+        // Create and spawn the event loop
+        let event_loop = EventLoop::new(
+            term.clone(),
+            event_listener,
+            pty,
+            false,
+            false,
+        )
+        .map_err(|e| format!("Failed to create event loop: {}", e))?;
+
+        let pty_channel = event_loop.channel();
+        let pty_tx = Notifier(pty_channel.clone());
+
+        // Spawn the event loop in a background thread
+        let _event_loop_handle = event_loop.spawn();
+        
+        // Spawn a thread to forward PTY write requests from the event listener
+        // to the actual PTY channel
+        std::thread::spawn(move || {
+            while let Ok(msg) = pty_write_rx.recv() {
+                let _ = pty_channel.send(msg);
+            }
+        });
+
+        Ok(Self {
+            term,
+            pty_tx,
+            event_rx,
+            size: Mutex::new(size),
+            title: Mutex::new(String::new()),
+            exited: Mutex::new(false),
+        })
+    }
+
+    fn write(&self, data: &[u8]) {
+        let _ = self.pty_tx.0.send(Msg::Input(Cow::Owned(data.to_vec())));
+    }
+
+    fn resize(&self, cols: usize, lines: usize) {
+        let mut size = self.size.lock();
+        size.cols = cols;
+        size.lines = lines;
+        
+        let window_size = WindowSize::from(*size);
+        self.term.lock().resize(*size);
+        let _ = self.pty_tx.0.send(Msg::Resize(window_size));
+    }
+
+    fn process_events(&self) -> Vec<TermEvent> {
+        let mut events = Vec::new();
+        while let Ok(event) = self.event_rx.try_recv() {
+            match &event {
+                TermEvent::Title(title) => {
+                    *self.title.lock() = title.clone();
+                }
+                TermEvent::Exit => {
+                    *self.exited.lock() = true;
+                }
+                _ => {}
+            }
+            events.push(event);
+        }
+        events
+    }
+
+    fn get_content(&self) -> String {
+        let term = self.term.lock();
+        let grid = term.grid();
+        let mut result = String::new();
+
+        // In alacritty_terminal, Line(0) is the topmost visible line
+        // and the grid uses negative indices for scrollback
+        for line_idx in 0..grid.screen_lines() {
+            let row = &grid[Line(line_idx as i32)];
+            let mut line_str = String::new();
+            for col_idx in 0..grid.columns() {
+                let cell = &row[Column(col_idx)];
+                let c = cell.c;
+                // Replace null chars with spaces for display
+                if c == '\0' || c == ' ' {
+                    line_str.push(' ');
+                } else {
+                    line_str.push(c);
+                }
+            }
+            // Trim trailing spaces from each line
+            let trimmed = line_str.trim_end();
+            result.push_str(trimmed);
+            if line_idx < grid.screen_lines() - 1 {
+                result.push('\n');
+            }
+        }
+
+        result
+    }
+
+    fn cursor_position(&self) -> (usize, usize) {
+        let term = self.term.lock();
+        let cursor = term.grid().cursor.point;
+        // Line can be negative in alacritty (for scrollback), clamp to 0
+        let line = if cursor.line.0 < 0 { 0 } else { cursor.line.0 as usize };
+        (line, cursor.column.0)
+    }
+
+    fn is_exited(&self) -> bool {
+        *self.exited.lock()
+    }
+
+    fn get_title(&self) -> String {
+        self.title.lock().clone()
+    }
+
+    fn get_mode(&self) -> TermMode {
+        self.term.lock().mode().clone()
+    }
+}
+
+/// Helper to convert Color to RGB values
+fn color_to_rgb(color: &Color) -> (u8, u8, u8) {
+    match color {
+        Color::Spec(rgb) => (rgb.r, rgb.g, rgb.b),
+        Color::Named(named) => {
+            // Return default colors for named colors
+            match named {
+                NamedColor::Black => (0, 0, 0),
+                NamedColor::Red => (205, 0, 0),
+                NamedColor::Green => (0, 205, 0),
+                NamedColor::Yellow => (205, 205, 0),
+                NamedColor::Blue => (0, 0, 238),
+                NamedColor::Magenta => (205, 0, 205),
+                NamedColor::Cyan => (0, 205, 205),
+                NamedColor::White => (229, 229, 229),
+                NamedColor::BrightBlack => (127, 127, 127),
+                NamedColor::BrightRed => (255, 0, 0),
+                NamedColor::BrightGreen => (0, 255, 0),
+                NamedColor::BrightYellow => (255, 255, 0),
+                NamedColor::BrightBlue => (92, 92, 255),
+                NamedColor::BrightMagenta => (255, 0, 255),
+                NamedColor::BrightCyan => (0, 255, 255),
+                NamedColor::BrightWhite => (255, 255, 255),
+                NamedColor::Foreground => (229, 229, 229),
+                NamedColor::Background => (0, 0, 0),
+                _ => (128, 128, 128), // Default gray for other cases
+            }
+        }
+        Color::Indexed(idx) => {
+            // Basic 16-color palette mapping
+            match idx {
+                0 => (0, 0, 0),
+                1 => (205, 0, 0),
+                2 => (0, 205, 0),
+                3 => (205, 205, 0),
+                4 => (0, 0, 238),
+                5 => (205, 0, 205),
+                6 => (0, 205, 205),
+                7 => (229, 229, 229),
+                8 => (127, 127, 127),
+                9 => (255, 0, 0),
+                10 => (0, 255, 0),
+                11 => (255, 255, 0),
+                12 => (92, 92, 255),
+                13 => (255, 0, 255),
+                14 => (0, 255, 255),
+                15 => (255, 255, 255),
+                // Extended 256-color palette - simplified
+                16..=231 => {
+                    let idx = idx - 16;
+                    let r = (idx / 36) * 51;
+                    let g = ((idx / 6) % 6) * 51;
+                    let b = (idx % 6) * 51;
+                    (r, g, b)
+                }
+                232..=255 => {
+                    let gray = (idx - 232) * 10 + 8;
+                    (gray, gray, gray)
+                }
+            }
+        }
+    }
 }
 
 #[emacs::module(name = "emacs-alacritty")]
@@ -33,70 +355,354 @@ fn init(_env: &Env) -> Result<()> {
     Ok(())
 }
 
+/// Create a new terminal with the given dimensions
+/// Returns a user pointer to the terminal state
 #[defun(user_ptr)]
-fn create_term(cols: i64, lines: i64) -> Result<AlacrittyTerm> {
-    let config = Config::default();
-    let dimensions = TermDimensions {
-        cols: cols as usize,
-        lines: lines as usize,
-    };
-    let term = Term::new(config, &dimensions, NoopEventListener);
-    let processor = Processor::new();
-    Ok(AlacrittyTerm { term, processor })
+fn create(cols: i64, lines: i64, shell: Option<String>) -> Result<AlacrittyTerm> {
+    AlacrittyTerm::new(cols as usize, lines as usize, shell)
+        .map_err(|e| emacs::Error::msg(e))
 }
 
+/// Write data to the terminal PTY (send input to the shell)
 #[defun]
-fn feed(at: &mut AlacrittyTerm, data: String) -> Result<()> {
-    at.processor.advance(&mut at.term, data.as_bytes());
+fn write_input(term: &AlacrittyTerm, data: String) -> Result<()> {
+    term.write(data.as_bytes());
     Ok(())
 }
 
+/// Resize the terminal to new dimensions
 #[defun]
-fn resize(at: &mut AlacrittyTerm, cols: i64, lines: i64) -> Result<()> {
-    let dimensions = TermDimensions {
-        cols: cols as usize,
-        lines: lines as usize,
-    };
-    at.term.resize(dimensions);
+fn resize(term: &AlacrittyTerm, cols: i64, lines: i64) -> Result<()> {
+    term.resize(cols as usize, lines as usize);
     Ok(())
 }
 
+/// Get the terminal content as a plain string
 #[defun]
-fn get_contents(at: &AlacrittyTerm) -> Result<String> {
-    let mut s = String::new();
-    let grid = at.term.grid();
-    for line in 0..grid.screen_lines() {
-        let row = &grid[alacritty_terminal::index::Line(line as i32)];
-        for col in 0..grid.columns() {
-            let cell = &row[alacritty_terminal::index::Column(col)];
-            s.push(cell.c);
-        }
-        s.push('\n');
-    }
-    Ok(s)
+fn get_text(term: &AlacrittyTerm) -> Result<String> {
+    Ok(term.get_content())
 }
 
+/// Get the cursor row (0-indexed)
 #[defun]
-fn get_line(at: &AlacrittyTerm, line: i64) -> Result<String> {
-    let mut s = String::new();
-    let grid = at.term.grid();
-    if (line as i32) < 0 || line as usize >= grid.screen_lines() {
-        return Ok("".to_string());
+fn cursor_row(term: &AlacrittyTerm) -> Result<i64> {
+    Ok(term.cursor_position().0 as i64)
+}
+
+/// Get the cursor column (0-indexed)
+#[defun]
+fn cursor_col(term: &AlacrittyTerm) -> Result<i64> {
+    Ok(term.cursor_position().1 as i64)
+}
+
+/// Check if the terminal process has exited
+#[defun]
+fn is_exited(term: &AlacrittyTerm) -> Result<bool> {
+    Ok(term.is_exited())
+}
+
+/// Get the terminal title (set by the shell/programs via escape sequences)
+#[defun]
+fn get_title(term: &AlacrittyTerm) -> Result<String> {
+    Ok(term.get_title())
+}
+
+/// Get the number of columns
+#[defun]
+fn columns(term: &AlacrittyTerm) -> Result<i64> {
+    Ok(term.size.lock().cols as i64)
+}
+
+/// Get the number of lines
+#[defun]
+fn lines(term: &AlacrittyTerm) -> Result<i64> {
+    Ok(term.size.lock().lines as i64)
+}
+
+/// Process pending events and return event info
+/// Returns a list of events: ((type . data) ...)
+#[defun]
+fn poll_events<'e>(env: &'e Env, term: &AlacrittyTerm) -> Result<Value<'e>> {
+    let events = term.process_events();
+    let mut result = env.intern("nil")?;
+
+    for event in events.into_iter().rev() {
+        let event_val = match event {
+            TermEvent::Title(title) => {
+                let title_sym = env.intern("title")?;
+                let title_val = title.into_lisp(env)?;
+                env.cons(title_sym, title_val)?
+            }
+            TermEvent::Bell => {
+                let bell_sym = env.intern("bell")?;
+                env.cons(bell_sym, env.intern("t")?)?
+            }
+            TermEvent::Exit => {
+                let exit_sym = env.intern("exit")?;
+                env.cons(exit_sym, env.intern("t")?)?
+            }
+            TermEvent::ClipboardStore(data) => {
+                let clip_sym = env.intern("clipboard-store")?;
+                let data_val = data.into_lisp(env)?;
+                env.cons(clip_sym, data_val)?
+            }
+            TermEvent::ClipboardLoad => {
+                let clip_sym = env.intern("clipboard-load")?;
+                env.cons(clip_sym, env.intern("t")?)?
+            }
+            TermEvent::Wakeup => {
+                let wakeup_sym = env.intern("wakeup")?;
+                env.cons(wakeup_sym, env.intern("t")?)?
+            }
+            _ => continue,
+        };
+        result = env.cons(event_val, result)?;
     }
-    let row = &grid[alacritty_terminal::index::Line(line as i32)];
+
+    Ok(result)
+}
+
+/// Check if the terminal is in application cursor mode
+#[defun]
+fn app_cursor_mode(term: &AlacrittyTerm) -> Result<bool> {
+    Ok(term.get_mode().contains(TermMode::APP_CURSOR))
+}
+
+/// Check if the terminal is in application keypad mode
+#[defun]
+fn app_keypad_mode(term: &AlacrittyTerm) -> Result<bool> {
+    Ok(term.get_mode().contains(TermMode::APP_KEYPAD))
+}
+
+/// Check if the terminal is in alternate screen mode
+#[defun]
+fn alt_screen_mode(term: &AlacrittyTerm) -> Result<bool> {
+    Ok(term.get_mode().contains(TermMode::ALT_SCREEN))
+}
+
+/// Check if bracketed paste mode is enabled
+#[defun]
+fn bracketed_paste_mode(term: &AlacrittyTerm) -> Result<bool> {
+    Ok(term.get_mode().contains(TermMode::BRACKETED_PASTE))
+}
+
+/// Get a single line of terminal content (0-indexed)
+#[defun]
+fn get_line(term: &AlacrittyTerm, line: i64) -> Result<String> {
+    let term_lock = term.term.lock();
+    let grid = term_lock.grid();
+    let line_idx = line as i32;
+
+    if line_idx < 0 || line_idx >= grid.screen_lines() as i32 {
+        return Ok(String::new());
+    }
+
+    let row = &grid[Line(line_idx)];
+    let mut result = String::new();
     for col in 0..grid.columns() {
-        let cell = &row[alacritty_terminal::index::Column(col)];
-        s.push(cell.c);
+        let c = row[Column(col)].c;
+        if c == '\0' {
+            result.push(' ');
+        } else {
+            result.push(c);
+        }
     }
-    Ok(s)
+
+    Ok(result.trim_end().to_string())
 }
 
+/// Get cell at position with attributes
+/// Returns (char fg-color bg-color flags) or nil if out of bounds
 #[defun]
-fn cursor_row(at: &AlacrittyTerm) -> Result<i64> {
-    Ok(at.term.grid().cursor.point.line.0 as i64)
+fn get_cell<'e>(env: &'e Env, term: &AlacrittyTerm, row: i64, col: i64) -> Result<Value<'e>> {
+    let term_lock = term.term.lock();
+    let grid = term_lock.grid();
+
+    if row < 0 || row >= grid.screen_lines() as i64 || col < 0 || col >= grid.columns() as i64 {
+        return env.intern("nil");
+    }
+
+    let cell = &grid[Line(row as i32)][Column(col as usize)];
+
+    // Create a list with cell information
+    let char_str = cell.c.to_string().into_lisp(env)?;
+    
+    let (fg_r, fg_g, fg_b) = color_to_rgb(&cell.fg);
+    let (bg_r, bg_g, bg_b) = color_to_rgb(&cell.bg);
+    
+    let fg_color = format!("#{:02x}{:02x}{:02x}", fg_r, fg_g, fg_b).into_lisp(env)?;
+    let bg_color = format!("#{:02x}{:02x}{:02x}", bg_r, bg_g, bg_b).into_lisp(env)?;
+
+    // Flags as a list of symbols
+    let mut flags = env.intern("nil")?;
+    if cell.flags.contains(CellFlags::BOLD) {
+        let bold = env.intern("bold")?;
+        flags = env.cons(bold, flags)?;
+    }
+    if cell.flags.contains(CellFlags::ITALIC) {
+        let italic = env.intern("italic")?;
+        flags = env.cons(italic, flags)?;
+    }
+    if cell.flags.contains(CellFlags::UNDERLINE) {
+        let underline = env.intern("underline")?;
+        flags = env.cons(underline, flags)?;
+    }
+    if cell.flags.contains(CellFlags::INVERSE) {
+        let inverse = env.intern("inverse")?;
+        flags = env.cons(inverse, flags)?;
+    }
+    if cell.flags.contains(CellFlags::STRIKEOUT) {
+        let strikeout = env.intern("strikeout")?;
+        flags = env.cons(strikeout, flags)?;
+    }
+    if cell.flags.contains(CellFlags::HIDDEN) {
+        let hidden = env.intern("hidden")?;
+        flags = env.cons(hidden, flags)?;
+    }
+
+    // Build result list
+    let nil = env.intern("nil")?;
+    let result = env.cons(flags, nil)?;
+    let result = env.cons(bg_color, result)?;
+    let result = env.cons(fg_color, result)?;
+    let result = env.cons(char_str, result)?;
+
+    Ok(result)
 }
 
+/// Send a special key to the terminal
+/// Key can be: up, down, left, right, home, end, page-up, page-down,
+/// tab, backspace, delete, insert, enter, escape, f1-f12
 #[defun]
-fn cursor_col(at: &AlacrittyTerm) -> Result<i64> {
-    Ok(at.term.grid().cursor.point.column.0 as i64)
+fn send_key(term: &AlacrittyTerm, key: String, modifiers: Option<String>) -> Result<()> {
+    let mode = term.get_mode();
+    let app_cursor = mode.contains(TermMode::APP_CURSOR);
+    let _app_keypad = mode.contains(TermMode::APP_KEYPAD);
+
+    let mods = modifiers.unwrap_or_default();
+    let ctrl = mods.contains("C");
+    let alt = mods.contains("M");
+    let shift = mods.contains("S");
+
+    let seq: &[u8] = match key.as_str() {
+        "up" => {
+            if app_cursor {
+                b"\x1bOA"
+            } else {
+                b"\x1b[A"
+            }
+        }
+        "down" => {
+            if app_cursor {
+                b"\x1bOB"
+            } else {
+                b"\x1b[B"
+            }
+        }
+        "right" => {
+            if app_cursor {
+                b"\x1bOC"
+            } else {
+                b"\x1b[C"
+            }
+        }
+        "left" => {
+            if app_cursor {
+                b"\x1bOD"
+            } else {
+                b"\x1b[D"
+            }
+        }
+        "home" => b"\x1b[H",
+        "end" => b"\x1b[F",
+        "page-up" => b"\x1b[5~",
+        "page-down" => b"\x1b[6~",
+        "tab" => {
+            if shift {
+                b"\x1b[Z"
+            } else {
+                b"\t"
+            }
+        }
+        "backspace" => {
+            if ctrl {
+                b"\x08"
+            } else if alt {
+                b"\x1b\x7f"
+            } else {
+                b"\x7f"
+            }
+        }
+        "delete" => b"\x1b[3~",
+        "insert" => b"\x1b[2~",
+        "enter" | "return" => {
+            if alt {
+                b"\x1b\r"
+            } else {
+                b"\r"
+            }
+        }
+        "escape" => b"\x1b",
+        "f1" => b"\x1bOP",
+        "f2" => b"\x1bOQ",
+        "f3" => b"\x1bOR",
+        "f4" => b"\x1bOS",
+        "f5" => b"\x1b[15~",
+        "f6" => b"\x1b[17~",
+        "f7" => b"\x1b[18~",
+        "f8" => b"\x1b[19~",
+        "f9" => b"\x1b[20~",
+        "f10" => b"\x1b[21~",
+        "f11" => b"\x1b[23~",
+        "f12" => b"\x1b[24~",
+        _ => return Ok(()),
+    };
+
+    term.write(seq);
+    Ok(())
+}
+
+/// Send a character with modifiers
+/// Handles ctrl+char, meta+char combinations
+#[defun]
+fn send_char(term: &AlacrittyTerm, c: i64, modifiers: Option<String>) -> Result<()> {
+    let ch = char::from_u32(c as u32).unwrap_or('\0');
+    let mods = modifiers.unwrap_or_default();
+    let ctrl = mods.contains("C");
+    let alt = mods.contains("M");
+
+    let mut data = Vec::new();
+
+    if alt {
+        data.push(0x1b);
+    }
+
+    if ctrl && ch.is_ascii_alphabetic() {
+        // Ctrl+A = 0x01, Ctrl+Z = 0x1A
+        let ctrl_char = (ch.to_ascii_lowercase() as u8) - b'a' + 1;
+        data.push(ctrl_char);
+    } else {
+        let mut buf = [0u8; 4];
+        let s = ch.encode_utf8(&mut buf);
+        data.extend_from_slice(s.as_bytes());
+    }
+
+    term.write(&data);
+    Ok(())
+}
+
+/// Send a paste with optional bracketed paste mode support
+#[defun]
+fn paste(term: &AlacrittyTerm, text: String) -> Result<()> {
+    let mode = term.get_mode();
+    let bracketed = mode.contains(TermMode::BRACKETED_PASTE);
+
+    if bracketed {
+        term.write(b"\x1b[200~");
+    }
+    term.write(text.as_bytes());
+    if bracketed {
+        term.write(b"\x1b[201~");
+    }
+    Ok(())
 }
