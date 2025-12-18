@@ -611,6 +611,16 @@ fn poll_events<'e>(env: &'e Env, term: &AlacrittyTerm) -> Result<Value<'e>> {
                 let wakeup_sym = env.intern("wakeup")?;
                 env.cons(wakeup_sym, env.intern("t")?)?
             }
+            TermEvent::CursorBlinkingChange => {
+                let blink_sym = env.intern("cursor-blink-change")?;
+                // Get current blink state from terminal
+                let blink_state = term.term.lock().cursor_style().blinking;
+                if blink_state {
+                    env.cons(blink_sym, env.intern("t")?)?
+                } else {
+                    env.cons(blink_sym, env.intern("nil")?)?
+                }
+            }
             _ => continue,
         };
         result = env.cons(event_val, result)?;
@@ -641,6 +651,13 @@ fn alt_screen_mode(term: &AlacrittyTerm) -> Result<bool> {
 #[defun]
 fn bracketed_paste_mode(term: &AlacrittyTerm) -> Result<bool> {
     Ok(term.get_mode().contains(TermMode::BRACKETED_PASTE))
+}
+
+/// Check if the cursor should be blinking
+#[defun]
+fn cursor_blink(term: &AlacrittyTerm) -> Result<bool> {
+    let term_lock = term.term.lock();
+    Ok(term_lock.cursor_style().blinking)
 }
 
 /// Get a single line of terminal content (0-indexed)

@@ -51,6 +51,7 @@
 (declare-function emacs-alacritty-send-char "emacs-alacritty")
 (declare-function emacs-alacritty-paste "emacs-alacritty")
 (declare-function emacs-alacritty-line-wraps "emacs-alacritty")
+(declare-function emacs-alacritty-cursor-blink "emacs-alacritty")
 
 ;; Load the dynamic module
 (defvar emacs-alacritty-module-path nil
@@ -166,6 +167,15 @@ the terminal width. Removing them produces cleaner output."
 Each entry is (NAME FUNCTION) where NAME is the command name
 received from the terminal and FUNCTION is the Emacs function to call."
   :type '(repeat (list string function))
+  :group 'emacs-alacritty)
+
+(defcustom emacs-alacritty-ignore-blink-cursor t
+  "When t, ignore requests from applications to turn on/off cursor blink.
+
+If nil, cursor in any window may begin to blink or not blink because
+`blink-cursor-mode' is a global minor mode in Emacs.
+You can use `M-x blink-cursor-mode' to toggle manually."
+  :type 'boolean
   :group 'emacs-alacritty)
 
 ;; Faces for terminal colors
@@ -658,7 +668,11 @@ For local directories, returns a command to cd to the directory and start the sh
            (kill-new (cdr event)))
           ('clipboard-load
            (when (and emacs-alacritty--term (current-kill 0 t))
-             (emacs-alacritty-paste emacs-alacritty--term (current-kill 0)))))))))
+             (emacs-alacritty-paste emacs-alacritty--term (current-kill 0))))
+          ('cursor-blink-change
+           (unless emacs-alacritty-ignore-blink-cursor
+             (let ((blink (cdr event)))
+               (blink-cursor-mode (if blink 1 -1))))))))))
 
 (defun emacs-alacritty--handle-exit ()
   "Handle terminal process exit."
