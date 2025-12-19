@@ -98,20 +98,11 @@ This handles package managers like straight.el that separate source and build di
 (defun alacritty--find-module ()
   "Find the alacritty dynamic module.
 Returns the path to the module if found, or nil if not found.
-Searches in `alacritty-module-build-dir' first, then falls back to
-the source directory's target folder for backwards compatibility."
+Looks in `alacritty-module-build-dir'."
   (let* ((module-name (alacritty--module-filename))
-         ;; Check the configured build directory first
-         (build-dir-path (expand-file-name module-name alacritty-module-build-dir))
-         ;; Fall back to source directory for backwards compatibility
-         (source-dir (alacritty--get-module-dir))
-         (release-path (expand-file-name (concat "target/release/" module-name) source-dir))
-         (debug-path (expand-file-name (concat "target/debug/" module-name) source-dir)))
-    (cond
-     ((file-exists-p build-dir-path) build-dir-path)
-     ((file-exists-p release-path) release-path)
-     ((file-exists-p debug-path) debug-path)
-     (t nil))))
+         (module-path (expand-file-name module-name alacritty-module-build-dir)))
+    (when (file-exists-p module-path)
+      module-path)))
 
 (defun alacritty--load-module ()
   "Load the alacritty dynamic module.
@@ -149,7 +140,7 @@ for example when using package managers that separate source and build directori
   :group 'alacritty)
 
 (defcustom alacritty-module-build-dir
-  (expand-file-name "alacritty" user-emacs-directory)
+  (locate-user-emacs-file "alacritty")
   "Directory where the compiled module will be stored.
 The compiled dynamic module will be placed in this directory."
   :type 'directory
@@ -182,34 +173,45 @@ Example: \"--features some-feature\""
 
 (defun alacritty-module-compile ()
   "Compile the alacritty module using cargo.
-The compiled module is placed in `alacritty-module-build-dir'."
+Copies source files to a temporary directory, compiles there,
+and installs the resulting module to `alacritty-module-build-dir'."
   (interactive)
   (unless (alacritty--cargo-is-available)
     (error "Cargo not found.  Please install Rust and Cargo first"))
-  (let* ((alacritty-directory (expand-file-name (alacritty--get-module-dir)))
+  (let* ((source-dir (expand-file-name (alacritty--get-module-dir)))
          (build-dir (expand-file-name alacritty-module-build-dir))
+         (temp-dir (make-temp-file "alacritty-build-" t))
          (module-name (alacritty--module-filename))
          (cargo-args (concat
                       (if alacritty-compile-release "--release " "")
                       alacritty-cargo-args))
          (target-subdir (if alacritty-compile-release "release" "debug"))
+         ;; Copy source files to temp, build there, copy result to build-dir
          (make-commands
-          (format "cd %s && cargo build %s && mkdir -p %s && cp %s %s"
-                  (shell-quote-argument alacritty-directory)
+          (format "cp %s %s %s && cp -r %s %s && cd %s && cargo build %s && mkdir -p %s && cp %s %s"
+                  (shell-quote-argument (expand-file-name "Cargo.toml" source-dir))
+                  (shell-quote-argument (expand-file-name "Cargo.lock" source-dir))
+                  (shell-quote-argument temp-dir)
+                  (shell-quote-argument (expand-file-name "src" source-dir))
+                  (shell-quote-argument temp-dir)
+                  (shell-quote-argument temp-dir)
                   cargo-args
                   (shell-quote-argument build-dir)
                   (shell-quote-argument (concat "target/" target-subdir "/" module-name))
                   (shell-quote-argument build-dir)))
          (buffer (get-buffer-create alacritty-install-buffer-name)))
     ;; Verify Cargo.toml exists before attempting to build
-    (unless (file-exists-p (expand-file-name "Cargo.toml" alacritty-directory))
-      (error "Cargo.toml not found in %s.  Set `alacritty-source-dir' to the source directory" alacritty-directory))
+    (unless (file-exists-p (expand-file-name "Cargo.toml" source-dir))
+      (error "Cargo.toml not found in %s.  Set `alacritty-source-dir' to the source directory" source-dir))
     (pop-to-buffer buffer)
     (compilation-mode)
-    (if (zerop (let ((inhibit-read-only t))
-                 (call-process "sh" nil buffer t "-c" make-commands)))
-        (message "Compilation of `alacritty' module succeeded. Module installed to %s" build-dir)
-      (error "Compilation of `alacritty' module failed!"))))
+    (unwind-protect
+        (if (zerop (let ((inhibit-read-only t))
+                     (call-process "sh" nil buffer t "-c" make-commands)))
+            (message "Compilation of `alacritty' module succeeded. Module installed to %s" build-dir)
+          (error "Compilation of `alacritty' module failed!"))
+      ;; Clean up temp directory
+      (delete-directory temp-dir t))))
 
 (defcustom alacritty-shell (or (getenv "SHELL") "/bin/sh")
   "Shell to run in the terminal."
