@@ -88,41 +88,6 @@ This handles package managers like straight.el that separate source and build di
               repos-dir
             dir))))))
 
-(defun alacritty--module-filename ()
-  "Return the platform-specific module filename."
-  (cond
-   ((eq system-type 'darwin) "libalacritty_emacs.dylib")
-   ((eq system-type 'windows-nt) "alacritty_emacs.dll")
-   (t "libalacritty_emacs.so")))
-
-(defun alacritty--find-module ()
-  "Find the alacritty dynamic module.
-Returns the path to the module if found, or nil if not found.
-Looks in `alacritty-module-build-dir'."
-  (let* ((module-name (alacritty--module-filename))
-         (module-path (expand-file-name module-name alacritty-module-build-dir)))
-    (when (file-exists-p module-path)
-      module-path)))
-
-(defun alacritty--load-module ()
-  "Load the alacritty dynamic module.
-If the module is not found, offers to compile it."
-  (unless alacritty-module-loaded
-    (let ((module-path (or alacritty-module-path
-                           (alacritty--find-module))))
-      (unless module-path
-        ;; Module not found, offer to compile
-        (if (or alacritty-always-compile-module
-                (y-or-n-p "alacritty module not found.  Compile it now? "))
-            (progn
-              (alacritty-module-compile)
-              (setq module-path (alacritty--find-module))
-              (unless module-path
-                (error "Compilation succeeded but module still not found")))
-          (error "alacritty will not work until the module is compiled")))
-      (module-load module-path)
-      (setq alacritty-module-loaded t))))
-
 ;; Customization
 
 (defgroup alacritty nil
@@ -166,6 +131,41 @@ Example: \"--features some-feature\""
 
 (defvar alacritty-install-buffer-name " *Install alacritty* "
   "Name of the buffer used for compiling alacritty.")
+
+(defun alacritty--module-filename ()
+  "Return the platform-specific module filename."
+  (cond
+   ((eq system-type 'darwin) "libalacritty_emacs.dylib")
+   ((eq system-type 'windows-nt) "alacritty_emacs.dll")
+   (t "libalacritty_emacs.so")))
+
+(defun alacritty--find-module ()
+  "Find the alacritty dynamic module.
+Returns the path to the module if found, or nil if not found.
+Looks in `alacritty-module-build-dir'."
+  (let* ((module-name (alacritty--module-filename))
+         (module-path (expand-file-name module-name alacritty-module-build-dir)))
+    (when (file-exists-p module-path)
+      module-path)))
+
+(defun alacritty--load-module ()
+  "Load the alacritty dynamic module.
+If the module is not found, offers to compile it."
+  (unless alacritty-module-loaded
+    (let ((module-path (or alacritty-module-path
+                           (alacritty--find-module))))
+      (unless module-path
+        ;; Module not found, offer to compile
+        (if (or alacritty-always-compile-module
+                (y-or-n-p "alacritty module not found.  Compile it now? "))
+            (progn
+              (alacritty-module-compile)
+              (setq module-path (alacritty--find-module))
+              (unless module-path
+                (error "Compilation succeeded but module still not found")))
+          (error "alacritty will not work until the module is compiled")))
+      (module-load module-path)
+      (setq alacritty-module-loaded t))))
 
 (defun alacritty--cargo-is-available ()
   "Check if cargo is available in PATH."
