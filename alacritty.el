@@ -125,6 +125,11 @@ If the module is not found, offers to compile it."
       (defalias 'alacritty--module-clear-dirty 'alacritty-emacs-alacritty--module-clear-dirty)
       (defalias 'alacritty--module-get-full-styled-content 'alacritty-emacs-alacritty--module-get-full-styled-content)
       (defalias 'alacritty--module-history-size 'alacritty-emacs-alacritty--module-history-size)
+      (defalias 'alacritty--module-get-render-data 'alacritty-emacs-alacritty--module-get-render-data)
+      (defalias 'alacritty--module-get-screen-render-data 'alacritty-emacs-alacritty--module-get-screen-render-data)
+      (defalias 'alacritty--module-get-damaged-lines 'alacritty-emacs-alacritty--module-get-damaged-lines)
+      (defalias 'alacritty--module-get-status 'alacritty-emacs-alacritty--module-get-status)
+      (defalias 'alacritty--module-alt-screen-mode 'alacritty-emacs-alacritty--module-alt-screen-mode)
       (setq alacritty-module-loaded t))))
 
 ;; Customization
@@ -258,7 +263,36 @@ will fall back to tramp's shell."
   :group 'alacritty)
 
 (defcustom alacritty-timer-interval 0.05
-  "Interval in seconds for the refresh timer."
+  "Interval in seconds for the refresh timer when terminal is active.
+This controls how frequently the display is updated during active use.
+Lower values give smoother updates but use more CPU.
+Default is 0.05 (20 Hz / 50ms)."
+  :type 'number
+  :group 'alacritty)
+
+(defcustom alacritty-idle-timer-interval 2.0
+  "Interval in seconds for the refresh timer when terminal is idle.
+When the terminal has been inactive for `alacritty-idle-delay' seconds,
+the timer switches to this slower interval to reduce CPU usage.
+Default is 2.0 (0.5 Hz / 2000ms).
+Note: The terminal will still respond immediately to user input."
+  :type 'number
+  :group 'alacritty)
+
+(defcustom alacritty-idle-delay 2.0
+  "Seconds of inactivity before switching to idle polling mode.
+After this many seconds without terminal output, the refresh timer
+will slow down to `alacritty-idle-timer-interval' to save CPU.
+Any new terminal activity will immediately switch back to active mode."
+  :type 'number
+  :group 'alacritty)
+
+(defcustom alacritty-min-render-interval 0.05
+  "Minimum interval in seconds between renders during continuous output.
+This rate-limits rendering to reduce CPU usage during heavy output
+like running htop or cat on large files.  Default is 0.05 (~20 FPS).
+Set to 0 to disable rate limiting (render as fast as possible).
+Note: vterm uses 0.1s, but we use a slightly faster rate for responsiveness."
   :type 'number
   :group 'alacritty)
 
@@ -394,6 +428,22 @@ actual newline characters.")
 (defvar-local alacritty--prompt-end nil
   "Buffer position of the end of the last prompt.
 Used for excluding prompts when copying.")
+
+(defvar-local alacritty--last-activity-time nil
+  "Time of last terminal activity (output from terminal).
+Used to determine when to switch to idle polling mode.")
+
+(defvar-local alacritty--idle-mode nil
+  "Non-nil when terminal is in idle mode (reduced polling frequency).
+Automatically switches to active mode when terminal produces output.")
+
+(defvar-local alacritty--last-render-time nil
+  "Time of last render operation.
+Used to rate-limit rendering during continuous output.")
+
+(defvar-local alacritty--render-scheduled nil
+  "Non-nil when a deferred render is scheduled.
+Used to coalesce multiple dirty events into a single render.")
 
 ;; Mode map
 
@@ -532,67 +582,256 @@ Used for excluding prompts when copying.")
   "Get the current window size in columns and lines."
   (cons (window-body-width) (window-body-height)))
 
+(defun alacritty--render-line-at (line-num segments)
+  "Render SEGMENTS at LINE-NUM (0-indexed) in the buffer.
+Replaces the existing line content."
+  (goto-char (point-min))
+  (forward-line line-num)
+  (let ((line-start (point)))
+    (end-of-line)
+    (delete-region line-start (point))
+    (dolist (segment segments)
+      (alacritty--insert-styled-segment segment))))
+
+(defun alacritty--do-render ()
+  "Perform the actual rendering of terminal content to the buffer.
+This is called by `alacritty--refresh' when the terminal is dirty.
+For alternate screen apps, uses incremental damage-based rendering.
+For normal mode with scrollback, uses full render."
+  ;; Inhibit redisplay during buffer modifications to prevent intermediate redraws
+  ;; This is a key optimization from vterm that significantly reduces CPU usage
+  (let ((inhibit-redisplay t))
+    (let ((alt-screen (alacritty--module-alt-screen-mode alacritty--term)))
+      (if alt-screen
+          ;; Alternate screen: use incremental damage-based rendering
+          (alacritty--do-render-incremental)
+        ;; Normal mode with scrollback: full render
+        (alacritty--do-render-full)))))
+
+(defun alacritty--do-render-incremental ()
+  "Render only damaged lines using alacritty_terminal's damage tracking.
+This is much more efficient for apps like htop that update frequently."
+  ;; Get damage info: (damage-type cursor-row cursor-col damaged-lines)
+  ;; damaged-lines is a list of (line-number . styled-segments)
+  (let* ((damage-data (alacritty--module-get-damaged-lines alacritty--term))
+         (damage-type (nth 0 damage-data))
+         (cursor-row (nth 1 damage-data))
+         (cursor-col (nth 2 damage-data))
+         (damaged-lines (nth 3 damage-data))
+         (screen-lines (window-body-height)))
+    
+    (if (eq damage-type 'full)
+        ;; Full damage - need to rebuild entire buffer
+        (progn
+          (erase-buffer)
+          ;; Insert all lines
+          (dolist (line-entry damaged-lines)
+            (let ((segments (cdr line-entry)))
+              (dolist (segment segments)
+                (alacritty--insert-styled-segment segment))
+              (insert "\n"))))
+      ;; Partial damage - only update changed lines
+      ;; First ensure buffer has enough lines
+      (let ((buffer-lines (count-lines (point-min) (point-max))))
+        (when (< buffer-lines screen-lines)
+          ;; Add missing lines
+          (goto-char (point-max))
+          (dotimes (_ (- screen-lines buffer-lines))
+            (insert "\n"))))
+      ;; Update only damaged lines
+      (dolist (line-entry damaged-lines)
+        (let ((line-num (car line-entry))
+              (segments (cdr line-entry)))
+          (alacritty--render-line-at line-num segments))))
+    
+    ;; Position cursor
+    (goto-char (point-min))
+    (forward-line cursor-row)
+    (let ((line-end (line-end-position))
+          (target-col cursor-col)
+          (visual-col 0))
+      (while (and (< (point) line-end)
+                  (< visual-col target-col))
+        (let* ((c (char-after))
+               (w (if c (char-width c) 1)))
+          (setq visual-col (+ visual-col w))
+          (forward-char 1))))
+    ;; Recenter if needed
+    (when (eq (current-buffer) (window-buffer))
+      (let ((win-height (window-body-height)))
+        (recenter (min cursor-row (1- win-height)))))))
+
+(defun alacritty--do-render-full ()
+  "Perform full rendering including scrollback history.
+Used for normal terminal mode (not alternate screen)."
+  ;; Get all render data: (styled-lines history-size cursor-row cursor-col wrap-flags)
+  (let* ((render-data (alacritty--module-get-render-data alacritty--term))
+         (styled-lines (nth 0 render-data))
+         (history-size (nth 1 render-data))
+         (cursor-row (nth 2 render-data))
+         (cursor-col (nth 3 render-data))
+         (wrap-flags (nth 4 render-data)))
+    (erase-buffer)
+    ;; Insert styled content
+    (dolist (line styled-lines)
+      (dolist (segment line)
+        (alacritty--insert-styled-segment segment))
+      (insert "\n"))
+    ;; Convert wrap-flags (0-indexed) to fake-newlines (1-indexed) for copy mode
+    (setq alacritty--fake-newlines (mapcar #'1+ wrap-flags))
+    ;; Position cursor
+    (goto-char (point-min))
+    (forward-line (+ history-size cursor-row))
+    (let ((line-end (line-end-position))
+          (target-col cursor-col)
+          (visual-col 0))
+      (while (and (< (point) line-end)
+                  (< visual-col target-col))
+        (let* ((c (char-after))
+               (w (if c (char-width c) 1)))
+          (setq visual-col (+ visual-col w))
+          (forward-char 1))))
+    ;; Recenter if needed
+    (when (eq (current-buffer) (window-buffer))
+      (let ((win-height (window-body-height)))
+        (recenter (min cursor-row (1- win-height)))))))
+
+(defun alacritty--maybe-switch-to-idle-mode ()
+  "Switch to idle polling mode if terminal has been inactive.
+Idle mode uses a slower timer interval to reduce CPU usage."
+  (when (and alacritty--last-activity-time
+             (not alacritty--idle-mode)
+             alacritty--timer)
+    (let ((idle-time (float-time (time-subtract (current-time)
+                                                 alacritty--last-activity-time))))
+      (when (> idle-time alacritty-idle-delay)
+        (setq alacritty--idle-mode t)
+        (cancel-timer alacritty--timer)
+        (let ((buffer (current-buffer)))
+          (setq alacritty--timer
+                (run-with-timer alacritty-idle-timer-interval
+                                alacritty-idle-timer-interval
+                                (lambda ()
+                                  (when (buffer-live-p buffer)
+                                    (with-current-buffer buffer
+                                      (alacritty--refresh)))))))))))
+
+(defun alacritty--switch-to-active-mode ()
+  "Switch to active polling mode (faster timer).
+Called when terminal produces output after being idle."
+  (when (and alacritty--idle-mode alacritty--timer)
+    (setq alacritty--idle-mode nil)
+    (cancel-timer alacritty--timer)
+    (let ((buffer (current-buffer)))
+      (setq alacritty--timer
+            (run-with-timer 0 alacritty-timer-interval
+                            (lambda ()
+                              (when (buffer-live-p buffer)
+                                (with-current-buffer buffer
+                                  (alacritty--refresh)))))))))
+
+(defun alacritty--schedule-deferred-render ()
+  "Schedule a deferred render after the minimum render interval.
+Used to coalesce rapid updates during continuous output."
+  (unless alacritty--render-scheduled
+    (setq alacritty--render-scheduled t)
+    (let ((buffer (current-buffer))
+          (delay (if alacritty--last-render-time
+                     (max 0 (- alacritty-min-render-interval
+                               (float-time (time-subtract (current-time)
+                                                          alacritty--last-render-time))))
+                   0)))
+      (run-with-timer delay nil
+                      (lambda ()
+                        (when (buffer-live-p buffer)
+                          (with-current-buffer buffer
+                            (setq alacritty--render-scheduled nil)
+                            (when alacritty--term
+                              (let ((inhibit-read-only t)
+                                    (inhibit-redisplay t))
+                                ;; dirty flag already cleared, just render
+                                (alacritty--do-render)
+                                (setq alacritty--last-render-time (current-time)))))))))))
+
+(defun alacritty--should-render-now-p ()
+  "Return non-nil if enough time has passed since last render.
+Used to rate-limit rendering during continuous output."
+  (or (null alacritty--last-render-time)
+      (<= alacritty-min-render-interval 0)
+      (>= (float-time (time-subtract (current-time) alacritty--last-render-time))
+          alacritty-min-render-interval)))
+
+(defun alacritty--handle-events (events)
+  "Handle terminal events returned from get-status.
+EVENTS is a list of (type . data) pairs."
+  (dolist (event events)
+    (pcase (car event)
+      ('title
+       (let ((title (cdr event)))
+         (setq alacritty--title title)
+         (alacritty--update-buffer-name)
+         ;; Parse title for directory information
+         (when-let ((dir-info (alacritty--parse-title-for-directory title)))
+           (apply #'alacritty--set-directory dir-info))))
+      ('bell
+       (ding))
+      ('clipboard-store
+       (kill-new (cdr event)))
+      ('clipboard-load
+       (when (and alacritty--term (current-kill 0 t))
+         (alacritty--module-paste alacritty--term (current-kill 0))))
+      ('cursor-blink-change
+       (unless alacritty-ignore-blink-cursor
+         (let ((blink (cdr event)))
+           (blink-cursor-mode (if blink 1 -1))))))))
+
 (defun alacritty--refresh ()
-  "Refresh the terminal display."
+  "Refresh the terminal display.
+Uses adaptive polling: fast updates during activity, slow when idle.
+Rate-limits rendering during continuous output to reduce CPU usage."
   (when (and alacritty--term
              (buffer-live-p (current-buffer))
-             (get-buffer-window (current-buffer))
              (not alacritty--copy-mode))
     (condition-case err
         (let ((inhibit-read-only t))
-          ;; Process any pending events (this also updates the dirty flag)
-          (alacritty--process-events)
-          
-          ;; Check if term is still valid (may have been cleared by exit event)
-          (when alacritty--term
-            ;; Check if terminal has exited (in case exit wasn't delivered as event)
-            (if (alacritty--module-is-exited alacritty--term)
-                (alacritty--handle-exit)
-              ;; Only redraw if terminal content has changed
-              (when (alacritty--module-is-dirty alacritty--term)
-                ;; Clear dirty flag before redrawing
-                (alacritty--module-clear-dirty alacritty--term)
-                ;; Update display with full styled content (including scrollback)
-                (let* ((styled-lines (alacritty--module-get-full-styled-content alacritty--term))
-                       (history-size (alacritty--module-history-size alacritty--term))
-                       (cursor-row (alacritty--module-cursor-row alacritty--term))
-                       (cursor-col (alacritty--module-cursor-col alacritty--term))
-                       (line-num 0)
-                       (fake-newlines nil))
-                  (erase-buffer)
-                  ;; Insert styled content and track fake newlines
-                  (dolist (line styled-lines)
-                    (dolist (segment line)
-                      (alacritty--insert-styled-segment segment))
-                    ;; Check if this line wraps (has a fake newline)
-                    ;; line-num is 0-indexed from start of buffer (including scrollback)
-                    (when (alacritty--module-line-wraps alacritty--term line-num)
-                      (push (1+ line-num) fake-newlines))  ; Store 1-indexed line number
-                    (insert "\n")
-                    (setq line-num (1+ line-num)))
-                  ;; Store fake newlines for copy mode
-                  (setq alacritty--fake-newlines (nreverse fake-newlines))
-                  ;; Position cursor
-                  ;; The terminal cursor position is relative to the visible screen (0-indexed).
-                  ;; In our buffer, visible lines start at history-size (0-indexed).
-                  ;; So buffer line = history-size + cursor-row
-                  (goto-char (point-min))
-                  (forward-line (+ history-size cursor-row))
-                  (let ((line-end (line-end-position))
-                        (target-col cursor-col)
-                        (visual-col 0))
-                    ;; Move forward character by character, tracking visual column
-                    (while (and (< (point) line-end)
-                                (< visual-col target-col))
-                      (let* ((c (char-after))
-                             (w (if c (char-width c) 1)))
-                        (setq visual-col (+ visual-col w))
-                        (forward-char 1))))
-                  ;; Ensure cursor is visible - recenter if needed
-                  ;; Only recenter if the current buffer is displayed in the selected window
-                  (when (eq (current-buffer) (window-buffer))
-                    (let ((win-height (window-body-height)))
-                      (recenter (min cursor-row (1- win-height))))))))))
+          ;; Get status and process events in a single FFI call
+          ;; Returns: (is-dirty is-exited events)
+          (let* ((status (alacritty--module-get-status alacritty--term))
+                 (is-dirty (nth 0 status))
+                 (is-exited (nth 1 status))
+                 (events (nth 2 status)))
+            
+            ;; Handle any events (title, bell, clipboard, etc.)
+            (when events
+              (alacritty--handle-events events))
+            
+            ;; Check if term is still valid (may have been cleared by exit event)
+            (when alacritty--term
+              (if is-exited
+                  (alacritty--handle-exit)
+                ;; Only redraw if terminal content has changed
+                (if is-dirty
+                    (progn
+                      ;; Clear dirty flag first - render will use damage() API
+                      (alacritty--module-clear-dirty alacritty--term)
+                      ;; Terminal has new output - record activity time
+                      (setq alacritty--last-activity-time (current-time))
+                      ;; Switch to active mode if we were idle
+                      (alacritty--switch-to-active-mode)
+                      ;; Only render if buffer is visible
+                      (when (get-buffer-window (current-buffer))
+                        ;; Rate-limit rendering during continuous output
+                        (if (alacritty--should-render-now-p)
+                            (progn
+                              ;; Enough time has passed - render immediately
+                              (alacritty--do-render)
+                              (setq alacritty--last-render-time (current-time)))
+                          ;; Too soon - schedule deferred render
+                          (alacritty--schedule-deferred-render))))
+                  ;; Not dirty - check if we should switch to idle mode
+                  ;; Only do idle check if we had no events (true idle)
+                  (unless events
+                    (alacritty--maybe-switch-to-idle-mode)))))))
       (error
        (message "alacritty refresh error: %s" (error-message-string err))))))
 
@@ -831,7 +1070,8 @@ For local directories, returns a command to cd to the directory and start the sh
           alacritty-shell))))
 
 (defun alacritty--process-events ()
-  "Process pending terminal events."
+  "Process pending terminal events.
+Returns non-nil if any events were processed."
   (when alacritty--term
     (let ((events (alacritty--module-poll-events alacritty--term)))
       (dolist (event events)
@@ -855,7 +1095,9 @@ For local directories, returns a command to cd to the directory and start the sh
           ('cursor-blink-change
            (unless alacritty-ignore-blink-cursor
              (let ((blink (cdr event)))
-               (blink-cursor-mode (if blink 1 -1))))))))))
+               (blink-cursor-mode (if blink 1 -1)))))))
+      ;; Return non-nil if we had events
+      events)))
 
 (defun alacritty--handle-exit ()
   "Handle terminal process exit."
@@ -898,6 +1140,21 @@ For local directories, returns a command to cd to the directory and start the sh
   "Handle window configuration changes."
   (alacritty--window-size-change nil))
 
+(defun alacritty--start-timer ()
+  "Start the refresh timer for the current buffer.
+Initializes activity tracking and starts in active mode."
+  (let ((buffer (current-buffer)))
+    ;; Initialize activity tracking - start as active
+    (setq alacritty--last-activity-time (current-time))
+    (setq alacritty--idle-mode nil)
+    ;; Start refresh timer in active mode
+    (setq alacritty--timer
+          (run-with-timer 0.1 alacritty-timer-interval
+                          (lambda ()
+                            (when (buffer-live-p buffer)
+                              (with-current-buffer buffer
+                                (alacritty--refresh))))))))
+
 ;; Public commands
 
 ;;;###autoload
@@ -919,13 +1176,8 @@ a shell there using `alacritty-tramp-shells'."
               (alacritty--module-create (car size) (cdr size)
                                       (alacritty--get-command)
                                       alacritty-max-scrollback))
-        ;; Start refresh timer
-        (setq alacritty--timer
-              (run-with-timer 0.1 alacritty-timer-interval
-                              (lambda ()
-                                (when (buffer-live-p buffer)
-                                  (with-current-buffer buffer
-                                    (alacritty--refresh))))))
+        ;; Start refresh timer with activity tracking
+        (alacritty--start-timer)
         ;; Setup window hooks
         (alacritty--setup-window-hooks)))))
 
@@ -948,13 +1200,8 @@ a shell there using `alacritty-tramp-shells'."
               (alacritty--module-create (car size) (cdr size)
                                       (alacritty--get-command)
                                       alacritty-max-scrollback))
-        ;; Start refresh timer
-        (setq alacritty--timer
-              (run-with-timer 0.1 alacritty-timer-interval
-                              (lambda ()
-                                (when (buffer-live-p buffer)
-                                  (with-current-buffer buffer
-                                    (alacritty--refresh))))))
+        ;; Start refresh timer with activity tracking
+        (alacritty--start-timer)
         ;; Setup window hooks
         (alacritty--setup-window-hooks)))))
 
@@ -1233,13 +1480,8 @@ if `alacritty-bookmark-check-dir' is non-nil."
                 (alacritty--module-create (car size) (cdr size)
                                         (alacritty--get-command)
                                         alacritty-max-scrollback))
-          (setq alacritty--timer
-                (run-with-timer 0.1 alacritty-timer-interval
-                                (let ((buffer buf))
-                                  (lambda ()
-                                    (when (buffer-live-p buffer)
-                                      (with-current-buffer buffer
-                                        (alacritty--refresh)))))))
+          ;; Start refresh timer with activity tracking
+          (alacritty--start-timer)
           (alacritty--setup-window-hooks))))
     ;; Check the current directory
     (with-current-buffer buf

@@ -9,7 +9,7 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::Flags as CellFlags;
-use alacritty_terminal::term::{Config, Term, TermMode};
+use alacritty_terminal::term::{Config, Term, TermDamage, TermMode};
 use alacritty_terminal::tty::{self, Options as PtyOptions, Shell};
 use alacritty_terminal::vte::ansi::{Color, NamedColor};
 use emacs::{defun, Env, IntoLisp, Result, Value};
@@ -136,7 +136,8 @@ pub struct AlacrittyTerm {
     size: Mutex<TermSize>,
     title: Mutex<String>,
     exited: Mutex<bool>,
-    /// Dirty flag - set when terminal content has changed and needs redraw
+    /// Simple dirty flag - set when we receive Wakeup events
+    /// The actual damage tracking is done by alacritty_terminal internally
     dirty: Arc<Mutex<bool>>,
 }
 
@@ -233,6 +234,9 @@ impl AlacrittyTerm {
         let window_size = WindowSize::from(*size);
         self.term.lock().resize(*size);
         let _ = self.pty_tx.0.send(Msg::Resize(window_size));
+
+        // Mark as dirty after resize
+        *self.dirty.lock() = true;
     }
 
     fn process_events(&self) -> Vec<TermEvent> {
@@ -247,6 +251,7 @@ impl AlacrittyTerm {
                 }
                 TermEvent::Wakeup => {
                     // Terminal content has changed, mark as dirty
+                    // alacritty_terminal tracks actual damage internally via Term::damage()
                     *self.dirty.lock() = true;
                 }
                 _ => {}
@@ -262,6 +267,38 @@ impl AlacrittyTerm {
 
     fn clear_dirty(&self) {
         *self.dirty.lock() = false;
+    }
+
+    /// Get status and process events in one call to reduce FFI overhead
+    /// Returns (is_dirty, is_exited, events_for_elisp)
+    /// where events_for_elisp only contains events that need Elisp handling
+    /// (title, bell, clipboard) - wakeup/exit are handled internally
+    fn get_status_and_process_events(&self) -> (bool, bool, Vec<TermEvent>) {
+        // Process events first
+        let mut events_for_elisp = Vec::new();
+        while let Ok(event) = self.event_rx.try_recv() {
+            match &event {
+                TermEvent::Title(title) => {
+                    *self.title.lock() = title.clone();
+                    events_for_elisp.push(event);
+                }
+                TermEvent::Exit => {
+                    *self.exited.lock() = true;
+                }
+                TermEvent::Wakeup => {
+                    *self.dirty.lock() = true;
+                }
+                TermEvent::Bell | TermEvent::ClipboardStore(_) | TermEvent::ClipboardLoad | TermEvent::CursorBlinkingChange => {
+                    events_for_elisp.push(event);
+                }
+                _ => {}
+            }
+        }
+        
+        let is_dirty = *self.dirty.lock();
+        let is_exited = *self.exited.lock();
+        
+        (is_dirty, is_exited, events_for_elisp)
     }
 
     fn get_content(&self) -> String {
@@ -599,6 +636,135 @@ fn make_segment<'e>(
     Ok(result)
 }
 
+/// Get render data for visible screen only (no scrollback) - optimized for alt-screen apps
+/// Returns: (styled-lines cursor-row cursor-col line-wrap-flags)
+/// This is faster than get-render-data as it skips scrollback history,
+/// ideal for fullscreen apps like htop, vim, etc.
+#[defun(name = "alacritty--module-get-screen-render-data")]
+fn get_screen_render_data<'e>(env: &'e Env, term: &AlacrittyTerm) -> Result<Value<'e>> {
+    let term_lock = term.term.lock();
+    let grid = term_lock.grid();
+
+    // Get cursor position
+    let cursor = grid.cursor.point;
+    let cursor_row = if cursor.line.0 < 0 {
+        0
+    } else {
+        cursor.line.0 as i64
+    };
+    let cursor_col = cursor.column.0 as i64;
+
+    let screen_lines = grid.screen_lines() as i32;
+
+    // Build styled lines for visible screen only (lines 0 to screen_lines-1)
+    let mut lines_list = env.intern("nil")?;
+    for line_idx in (0..screen_lines).rev() {
+        let row = &grid[Line(line_idx)];
+        let segments_list = build_line_segments(env, row, grid.columns())?;
+        lines_list = env.cons(segments_list, lines_list)?;
+    }
+
+    // Build line-wrap flags list for visible screen only
+    let mut wrap_flags = env.intern("nil")?;
+    for line_idx in (0..screen_lines).rev() {
+        let row = &grid[Line(line_idx)];
+        let last_col = grid.columns().saturating_sub(1);
+        if row[Column(last_col)].flags.contains(CellFlags::WRAPLINE) {
+            let idx_val = (line_idx as i64).into_lisp(env)?;
+            wrap_flags = env.cons(idx_val, wrap_flags)?;
+        }
+    }
+
+    // Build result: (styled-lines cursor-row cursor-col line-wrap-flags)
+    let nil = env.intern("nil")?;
+    let result = env.cons(wrap_flags, nil)?;
+    let cursor_col_val = cursor_col.into_lisp(env)?;
+    let result = env.cons(cursor_col_val, result)?;
+    let cursor_row_val = cursor_row.into_lisp(env)?;
+    let result = env.cons(cursor_row_val, result)?;
+    let result = env.cons(lines_list, result)?;
+
+    Ok(result)
+}
+
+/// Get only the damaged (changed) lines for incremental rendering
+/// Returns: (damage-type cursor-row cursor-col damaged-lines)
+/// where damage-type is 'full or 'partial
+/// and damaged-lines is a list of (line-number . styled-segments) for partial damage
+/// For full damage, damaged-lines contains all screen lines
+/// This uses alacritty_terminal's built-in damage tracking for efficiency.
+#[defun(name = "alacritty--module-get-damaged-lines")]
+fn get_damaged_lines<'e>(env: &'e Env, term: &AlacrittyTerm) -> Result<Value<'e>> {
+    let mut term_lock = term.term.lock();
+
+    // Get damage information and collect damaged line numbers
+    // We need to collect first because the iterator borrows term_lock mutably
+    let damage = term_lock.damage();
+    let (is_full, damaged_line_nums): (bool, Vec<usize>) = match damage {
+        TermDamage::Full => (true, Vec::new()),
+        TermDamage::Partial(iter) => {
+            let mut nums: Vec<_> = iter.map(|d| d.line).collect();
+            nums.sort();
+            nums.dedup();
+            (false, nums)
+        }
+    };
+
+    // Reset damage state after reading
+    term_lock.reset_damage();
+
+    // Now get cursor position and grid info
+    let grid = term_lock.grid();
+    let cursor = grid.cursor.point;
+    let cursor_row = if cursor.line.0 < 0 {
+        0
+    } else {
+        cursor.line.0 as i64
+    };
+    let cursor_col = cursor.column.0 as i64;
+    let num_cols = grid.columns();
+    let screen_lines = grid.screen_lines() as i32;
+
+    // Build the result based on damage type
+    let (damage_type, damaged_lines) = if is_full {
+        // Full damage - return all visible lines
+        let mut lines_list = env.intern("nil")?;
+        for line_idx in (0..screen_lines).rev() {
+            let row = &grid[Line(line_idx)];
+            let segments_list = build_line_segments(env, row, num_cols)?;
+            let line_num = (line_idx as i64).into_lisp(env)?;
+            let line_entry = env.cons(line_num, segments_list)?;
+            lines_list = env.cons(line_entry, lines_list)?;
+        }
+        (env.intern("full")?, lines_list)
+    } else {
+        // Partial damage - only return damaged lines
+        let mut lines_list = env.intern("nil")?;
+        for line_idx in damaged_line_nums.into_iter().rev() {
+            // Bounds check
+            if line_idx < screen_lines as usize {
+                let row = &grid[Line(line_idx as i32)];
+                let segments_list = build_line_segments(env, row, num_cols)?;
+                let line_num = (line_idx as i64).into_lisp(env)?;
+                let line_entry = env.cons(line_num, segments_list)?;
+                lines_list = env.cons(line_entry, lines_list)?;
+            }
+        }
+        (env.intern("partial")?, lines_list)
+    };
+
+    // Build result: (damage-type cursor-row cursor-col damaged-lines)
+    let nil = env.intern("nil")?;
+    let result = env.cons(damaged_lines, nil)?;
+    let cursor_col_val = cursor_col.into_lisp(env)?;
+    let result = env.cons(cursor_col_val, result)?;
+    let cursor_row_val = cursor_row.into_lisp(env)?;
+    let result = env.cons(cursor_row_val, result)?;
+    let result = env.cons(damage_type, result)?;
+
+    Ok(result)
+}
+
 /// Check if a line wraps (has a fake newline at the end)
 /// Returns true if the line continues on the next line (i.e., should NOT have a real newline)
 /// Line index is 0-based from the start of the buffer (including scrollback)
@@ -625,6 +791,63 @@ fn line_wraps(term: &AlacrittyTerm, line: i64) -> Result<bool> {
     // Check if the last column has the WRAPLINE flag
     let last_col = grid.columns().saturating_sub(1);
     Ok(row[Column(last_col)].flags.contains(CellFlags::WRAPLINE))
+}
+
+/// Get terminal status and process events in one call to reduce FFI overhead
+/// Returns: (is-dirty is-exited events)
+/// where events is a list of events that need Elisp handling (title, bell, clipboard)
+/// This combines poll-events, is-dirty, and is-exited into a single call.
+#[defun(name = "alacritty--module-get-status")]
+fn get_status<'e>(env: &'e Env, term: &AlacrittyTerm) -> Result<Value<'e>> {
+    let (is_dirty, is_exited, events) = term.get_status_and_process_events();
+    
+    let nil = env.intern("nil")?;
+    let t = env.intern("t")?;
+    
+    // Build events list
+    let mut events_list = nil;
+    for event in events.into_iter().rev() {
+        let event_val = match event {
+            TermEvent::Title(title) => {
+                let title_sym = env.intern("title")?;
+                let title_val = title.into_lisp(env)?;
+                env.cons(title_sym, title_val)?
+            }
+            TermEvent::Bell => {
+                let bell_sym = env.intern("bell")?;
+                env.cons(bell_sym, t)?
+            }
+            TermEvent::ClipboardStore(data) => {
+                let clip_sym = env.intern("clipboard-store")?;
+                let data_val = data.into_lisp(env)?;
+                env.cons(clip_sym, data_val)?
+            }
+            TermEvent::ClipboardLoad => {
+                let clip_sym = env.intern("clipboard-load")?;
+                env.cons(clip_sym, t)?
+            }
+            TermEvent::CursorBlinkingChange => {
+                let blink_sym = env.intern("cursor-blink-change")?;
+                let blink_state = term.term.lock().cursor_style().blinking;
+                if blink_state {
+                    env.cons(blink_sym, t)?
+                } else {
+                    env.cons(blink_sym, nil)?
+                }
+            }
+            _ => continue,
+        };
+        events_list = env.cons(event_val, events_list)?;
+    }
+    
+    let is_exited_val = if is_exited { t } else { nil };
+    let is_dirty_val = if is_dirty { t } else { nil };
+    
+    let result = env.cons(events_list, nil)?;
+    let result = env.cons(is_exited_val, result)?;
+    let result = env.cons(is_dirty_val, result)?;
+    
+    Ok(result)
 }
 
 /// Get the cursor row (0-indexed)
@@ -984,4 +1207,64 @@ fn paste(term: &AlacrittyTerm, text: String) -> Result<()> {
         term.write(b"\x1b[201~");
     }
     Ok(())
+}
+
+/// Get all render data in a single FFI call for efficiency
+/// Returns: (styled-lines history-size cursor-row cursor-col line-wrap-flags)
+/// where line-wrap-flags is a list of line indices (0-based) that have fake newlines
+/// This combines get-full-styled-content, history-size, cursor-row, cursor-col,
+/// and line-wraps into a single call to reduce FFI overhead.
+#[defun(name = "alacritty--module-get-render-data")]
+fn get_render_data<'e>(env: &'e Env, term: &AlacrittyTerm) -> Result<Value<'e>> {
+    let term_lock = term.term.lock();
+    let grid = term_lock.grid();
+
+    // Get cursor position
+    let cursor = grid.cursor.point;
+    let cursor_row = if cursor.line.0 < 0 {
+        0
+    } else {
+        cursor.line.0 as i64
+    };
+    let cursor_col = cursor.column.0 as i64;
+
+    // Calculate history size
+    let history_size = grid.total_lines().saturating_sub(grid.screen_lines()) as i64;
+    let start_line = -(history_size as i32);
+    let end_line = grid.screen_lines() as i32;
+
+    // Build styled lines (same as get_full_styled_content)
+    let mut lines_list = env.intern("nil")?;
+    for line_idx in (start_line..end_line).rev() {
+        let row = &grid[Line(line_idx)];
+        let segments_list = build_line_segments(env, row, grid.columns())?;
+        lines_list = env.cons(segments_list, lines_list)?;
+    }
+
+    // Build line-wrap flags list (lines that have fake newlines)
+    // Return as list of 0-based line indices from start of buffer
+    let mut wrap_flags = env.intern("nil")?;
+    let total_lines = (end_line - start_line) as usize;
+    for buffer_line_idx in (0..total_lines).rev() {
+        let grid_line = (buffer_line_idx as i32) + start_line;
+        let row = &grid[Line(grid_line)];
+        let last_col = grid.columns().saturating_sub(1);
+        if row[Column(last_col)].flags.contains(CellFlags::WRAPLINE) {
+            let idx_val = (buffer_line_idx as i64).into_lisp(env)?;
+            wrap_flags = env.cons(idx_val, wrap_flags)?;
+        }
+    }
+
+    // Build result: (styled-lines history-size cursor-row cursor-col line-wrap-flags)
+    let nil = env.intern("nil")?;
+    let result = env.cons(wrap_flags, nil)?;
+    let cursor_col_val = cursor_col.into_lisp(env)?;
+    let result = env.cons(cursor_col_val, result)?;
+    let cursor_row_val = cursor_row.into_lisp(env)?;
+    let result = env.cons(cursor_row_val, result)?;
+    let history_size_val = history_size.into_lisp(env)?;
+    let result = env.cons(history_size_val, result)?;
+    let result = env.cons(lines_list, result)?;
+
+    Ok(result)
 }
