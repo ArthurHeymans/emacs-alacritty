@@ -589,8 +589,10 @@ Used for excluding prompts when copying.")
                         (setq visual-col (+ visual-col w))
                         (forward-char 1))))
                   ;; Ensure cursor is visible - recenter if needed
-                  (let ((win-height (window-body-height)))
-                    (recenter (min cursor-row (1- win-height)))))))))
+                  ;; Only recenter if the current buffer is displayed in the selected window
+                  (when (eq (current-buffer) (window-buffer))
+                    (let ((win-height (window-body-height)))
+                      (recenter (min cursor-row (1- win-height))))))))))
       (error
        (message "alacritty refresh error: %s" (error-message-string err))))))
 
