@@ -36,26 +36,10 @@
 (require 'tramp)
 (require 'bookmark)
 
-;; Declare functions provided by the dynamic module
-(declare-function alacritty--module-create "alacritty")
-(declare-function alacritty--module-resize "alacritty")
-(declare-function alacritty--module-write-input "alacritty")
-(declare-function alacritty--module-get-text "alacritty")
-(declare-function alacritty--module-get-styled-content "alacritty")
-(declare-function alacritty--module-cursor-row "alacritty")
-(declare-function alacritty--module-cursor-col "alacritty")
-(declare-function alacritty--module-is-exited "alacritty")
-(declare-function alacritty--module-get-title "alacritty")
-(declare-function alacritty--module-poll-events "alacritty")
-(declare-function alacritty--module-send-key "alacritty")
-(declare-function alacritty--module-send-char "alacritty")
-(declare-function alacritty--module-paste "alacritty")
-(declare-function alacritty--module-line-wraps "alacritty")
-(declare-function alacritty--module-cursor-blink "alacritty")
-(declare-function alacritty--module-is-dirty "alacritty")
-(declare-function alacritty--module-clear-dirty "alacritty")
-(declare-function alacritty--module-get-full-styled-content "alacritty")
-(declare-function alacritty--module-history-size "alacritty")
+;; Functions provided by the dynamic module
+;; These are created as aliases in alacritty--load-module for the actual
+;; alacritty-emacs-alacritty--module-* functions exported by the Rust module.
+;; We don't use declare-function here because the aliases are created at runtime.
 
 ;; Load the dynamic module
 (defvar alacritty-module-path nil
@@ -116,6 +100,26 @@ If the module is not found, offers to compile it."
                 (error "Compilation succeeded but module still not found")))
           (error "alacritty will not work until the module is compiled")))
       (module-load module-path)
+      ;; Create aliases for the module functions (they are prefixed with the crate name)
+      (defalias 'alacritty--module-create 'alacritty-emacs-alacritty--module-create)
+      (defalias 'alacritty--module-resize 'alacritty-emacs-alacritty--module-resize)
+      (defalias 'alacritty--module-write-input 'alacritty-emacs-alacritty--module-write-input)
+      (defalias 'alacritty--module-get-text 'alacritty-emacs-alacritty--module-get-text)
+      (defalias 'alacritty--module-get-styled-content 'alacritty-emacs-alacritty--module-get-styled-content)
+      (defalias 'alacritty--module-cursor-row 'alacritty-emacs-alacritty--module-cursor-row)
+      (defalias 'alacritty--module-cursor-col 'alacritty-emacs-alacritty--module-cursor-col)
+      (defalias 'alacritty--module-is-exited 'alacritty-emacs-alacritty--module-is-exited)
+      (defalias 'alacritty--module-get-title 'alacritty-emacs-alacritty--module-get-title)
+      (defalias 'alacritty--module-poll-events 'alacritty-emacs-alacritty--module-poll-events)
+      (defalias 'alacritty--module-send-key 'alacritty-emacs-alacritty--module-send-key)
+      (defalias 'alacritty--module-send-char 'alacritty-emacs-alacritty--module-send-char)
+      (defalias 'alacritty--module-paste 'alacritty-emacs-alacritty--module-paste)
+      (defalias 'alacritty--module-line-wraps 'alacritty-emacs-alacritty--module-line-wraps)
+      (defalias 'alacritty--module-cursor-blink 'alacritty-emacs-alacritty--module-cursor-blink)
+      (defalias 'alacritty--module-is-dirty 'alacritty-emacs-alacritty--module-is-dirty)
+      (defalias 'alacritty--module-clear-dirty 'alacritty-emacs-alacritty--module-clear-dirty)
+      (defalias 'alacritty--module-get-full-styled-content 'alacritty-emacs-alacritty--module-get-full-styled-content)
+      (defalias 'alacritty--module-history-size 'alacritty-emacs-alacritty--module-history-size)
       (setq alacritty-module-loaded t))))
 
 ;; Customization
