@@ -388,7 +388,7 @@ fn color_to_rgb(color: &Color) -> (u8, u8, u8) {
     }
 }
 
-#[emacs::module(name = "alacritty")]
+#[emacs::module(name = "alacritty-module")]
 fn init(_env: &Env) -> Result<()> {
     Ok(())
 }
