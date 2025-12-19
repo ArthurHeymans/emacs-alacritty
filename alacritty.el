@@ -506,6 +506,7 @@ Used for excluding prompts when copying.")
   "Refresh the terminal display."
   (when (and alacritty--term
              (buffer-live-p (current-buffer))
+             (get-buffer-window (current-buffer))
              (not alacritty--copy-mode))
     (condition-case err
         (let ((inhibit-read-only t))
@@ -925,6 +926,13 @@ a shell there using `alacritty-tramp-shells'."
         ;; Setup window hooks
         (alacritty--setup-window-hooks)))))
 
+(defun alacritty--cleanup ()
+  "Clean up terminal resources when buffer is killed."
+  (when alacritty--timer
+    (cancel-timer alacritty--timer)
+    (setq alacritty--timer nil))
+  (setq alacritty--term nil))
+
 (define-derived-mode alacritty-mode fundamental-mode "Alacritty"
   "Major mode for Alacritty terminal emulator.
 
@@ -940,6 +948,8 @@ a shell there using `alacritty-tramp-shells'."
   (setq-local auto-hscroll-mode 'current-line)
   ;; Bookmark support
   (setq-local bookmark-make-record-function #'alacritty--bookmark-make-record)
+  ;; Cleanup hook - cancel timer when buffer is killed
+  (add-hook 'kill-buffer-hook #'alacritty--cleanup nil t)
   ;; Environment variables for shell
   (setenv "TERM" "xterm-256color")
   (setenv "COLORTERM" "truecolor")
