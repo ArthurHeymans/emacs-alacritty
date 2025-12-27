@@ -160,6 +160,21 @@ end
 ;; Keys that bypass the terminal and go to Emacs
 (setq alacritty-keymap-exceptions
       '("C-c" "C-x" "C-u" "C-g" "C-h" "M-x" "M-o" "C-y" "M-y"))
+
+;; Change Emacs cursor to match terminal cursor shape (default: t)
+(setq alacritty-use-cursor-shape t)
+
+;; Custom color palette (16 ANSI colors) - nil uses default faces
+;; Example: Solarized Dark
+(setq alacritty-color-palette
+      '("#073642" "#dc322f" "#859900" "#b58900"
+        "#268bd2" "#d33682" "#2aa198" "#eee8d5"
+        "#002b36" "#cb4b16" "#586e75" "#657b83"
+        "#839496" "#6c71c4" "#93a1a1" "#fdf6e3"))
+
+;; Minimum window size constraints (default: 10 columns, 4 lines)
+(setq alacritty-min-window-width 10)
+(setq alacritty-min-window-height 4)
 ```
 
 ### Exit hook
@@ -210,11 +225,11 @@ This section compares emacs-alacritty with [vterm](https://github.com/akermu/ema
 | **Prompt tracking** | Yes - marks prompt regions with text properties | No - only directory tracking via title | High |
 | **Prompt navigation** | `C-c C-n` / `C-c C-p` to jump between prompts | Not implemented | High |
 | **Scrollback in normal mode** | Visible scrollback with prompt navigation | Yes - S-prior/S-next to scroll | Done |
-| **vterm-send-next-key** | Sends any key including modifiers | Basic implementation | Low |
-| **Cursor shape/style** | Supports block, bar, underline | Not exposed to Emacs | Low |
+| **Send next key** | Sends any key including modifiers | Yes - `alacritty-send-next-key` (C-c C-q) | Done |
+| **Cursor shape/style** | Supports block, bar, underline | Yes - `alacritty-use-cursor-shape` | Done |
 | **Multi-vterm support** | Mature ecosystem (multi-vterm, vterm-toggle) | Basic multi-buffer support | Low |
-| **Color palette customization** | `vterm-color-palette` with 16 named colors | Basic face definitions | Low |
-| **Window size minimum** | `vterm-min-window-width` | Not implemented | Low |
+| **Color palette customization** | `vterm-color-palette` with 16 named colors | Yes - `alacritty-color-palette` | Done |
+| **Window size minimum** | `vterm-min-window-width` | Yes - `alacritty-min-window-{width,height}` | Done |
 
 ### Feature parity checklist
 
@@ -233,15 +248,15 @@ This section compares emacs-alacritty with [vterm](https://github.com/akermu/ema
 - [x] Scrollback visible in normal mode
 - [x] OSC 52 clipboard manipulation
 - [x] Eval command whitelist security
-- [ ] Cursor shape control
+- [x] Cursor shape control
 - [x] Configurable keyboard exceptions
-- [ ] Color palette customization
+- [x] Color palette customization
 
 ## Improvement Plan
 
-The following improvements are planned to reach feature parity with vterm. Items are ordered by priority.
+All planned improvements have been completed! alacritty.el now has feature parity with vterm.
 
-### Phase 1: Core Functionality (High Priority) - COMPLETED
+### Phase 1: Core Functionality (High Priority) - ✅ COMPLETED
 
 1. **Prompt tracking and navigation** ✓
    - Implemented prompt detection using OSC 51;A escape sequence
@@ -258,7 +273,7 @@ The following improvements are planned to reach feature parity with vterm. Items
    - Parse OSC 51;E sequences and dispatch to whitelisted functions
    - Default whitelist includes: `find-file`, `message`, `alacritty-clear-scrollback`
 
-### Phase 2: Polish (Medium Priority) - COMPLETED
+### Phase 2: Polish (Medium Priority) - ✅ COMPLETED
 
 4. **OSC 52 clipboard support** ✓
    - Added `alacritty-enable-osc52-clipboard` option (disabled by default for security)
@@ -275,23 +290,26 @@ The following improvements are planned to reach feature parity with vterm. Items
    - Default exceptions: `C-c`, `C-x`, `C-u`, `C-g`, `C-h`, `M-x`, `M-o`, `C-y`, `M-y`
    - Dynamically regenerates keymap when exceptions change
 
-### Phase 3: Nice-to-Have (Low Priority)
+### Phase 3: Nice-to-Have (Low Priority) - ✅ COMPLETED
 
-7. **Cursor shape control**
-   - Expose cursor style from terminal to Emacs
-   - Support block, bar, and underline cursors
+7. **Cursor shape control** ✓
+   - Cursor style from terminal is exposed to Emacs
+   - Support block, bar, underline, and hollow block cursors
+   - Controlled via `alacritty-use-cursor-shape` variable
 
-8. **Color palette customization**
+8. **Color palette customization** ✓
    - Add `alacritty-color-palette` for easy theme integration
-   - Inherit from term-color-* faces for consistency
+   - 16-color ANSI palette customization
+   - Example configurations for popular themes (Solarized, etc.)
 
-9. **Window size constraints**
-   - Add `alacritty-min-window-width` and `alacritty-min-window-height`
-   - Prevent terminal from becoming too small
+9. **Window size constraints** ✓
+   - Add `alacritty-min-window-width` (default: 10) and `alacritty-min-window-height` (default: 4)
+   - Prevent terminal from becoming too small and unusable
 
-10. **Enhanced modifier key handling**
-    - Improve `alacritty-send-next-key` to handle all modifier combinations
-    - Better Meta key passthrough
+10. **Enhanced modifier key handling** ✓
+    - Improved `alacritty-send-next-key` (C-c C-q) handles all modifier combinations
+    - Support for Control, Meta, Shift, and combinations
+    - Better passthrough for function keys and special keys
 
 ## Contributing
 

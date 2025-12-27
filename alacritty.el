@@ -66,6 +66,7 @@
 (declare-function alacritty--module-redraw-with-damage "alacritty")
 (declare-function alacritty--module-get-prompt-positions "alacritty")
 (declare-function alacritty--module-clear-prompt-positions "alacritty")
+(declare-function alacritty--module-cursor-style "alacritty")
 
 ;; Customization - must be defined before functions that use them
 
@@ -325,7 +326,95 @@ or call `alacritty--setup-keymap' for changes to take effect."
            (alacritty--setup-keymap)))
   :group 'alacritty)
 
+(defcustom alacritty-use-cursor-shape t
+  "When non-nil, change Emacs cursor shape to match terminal cursor shape.
+
+The terminal can request different cursor shapes (block, beam, underline)
+via escape sequences.  When this is enabled, the Emacs cursor will change
+to match."
+  :type 'boolean
+  :group 'alacritty)
+
+(defcustom alacritty-min-window-width 10
+  "Minimum width (in columns) for the terminal window.
+If a window resize would make the terminal narrower than this,
+the resize is clamped to this minimum."
+  :type 'integer
+  :group 'alacritty)
+
+(defcustom alacritty-min-window-height 4
+  "Minimum height (in lines) for the terminal window.
+If a window resize would make the terminal shorter than this,
+the resize is clamped to this minimum."
+  :type 'integer
+  :group 'alacritty)
+
+(defcustom alacritty-color-palette nil
+  "Custom color palette for the 16 ANSI colors.
+
+When nil (default), use the built-in alacritty color faces.
+When set, should be a list of 16 color strings for:
+  0: black, 1: red, 2: green, 3: yellow,
+  4: blue, 5: magenta, 6: cyan, 7: white,
+  8: bright black, 9: bright red, 10: bright green, 11: bright yellow,
+  12: bright blue, 13: bright magenta, 14: bright cyan, 15: bright white
+
+Colors can be specified as hex strings (e.g., \"#ff0000\") or color names.
+
+Example (Solarized Dark):
+  (setq alacritty-color-palette
+        \\='(\"#073642\" \"#dc322f\" \"#859900\" \"#b58900\"
+          \"#268bd2\" \"#d33682\" \"#2aa198\" \"#eee8d5\"
+          \"#002b36\" \"#cb4b16\" \"#586e75\" \"#657b83\"
+          \"#839496\" \"#6c71c4\" \"#93a1a1\" \"#fdf6e3\"))"
+  :type '(choice (const :tag "Use default faces" nil)
+                 (list :tag "Custom palette (16 colors)"
+                       (string :tag "0: Black")
+                       (string :tag "1: Red")
+                       (string :tag "2: Green")
+                       (string :tag "3: Yellow")
+                       (string :tag "4: Blue")
+                       (string :tag "5: Magenta")
+                       (string :tag "6: Cyan")
+                       (string :tag "7: White")
+                       (string :tag "8: Bright Black")
+                       (string :tag "9: Bright Red")
+                       (string :tag "10: Bright Green")
+                       (string :tag "11: Bright Yellow")
+                       (string :tag "12: Bright Blue")
+                       (string :tag "13: Bright Magenta")
+                       (string :tag "14: Bright Cyan")
+                       (string :tag "15: Bright White")))
+  :group 'alacritty)
+
 ;; Faces for terminal colors
+
+(defun alacritty--apply-color-palette ()
+  "Apply custom color palette if `alacritty-color-palette' is set."
+  (when alacritty-color-palette
+    (let ((colors alacritty-color-palette)
+          (faces '(alacritty-color-black
+                   alacritty-color-red
+                   alacritty-color-green
+                   alacritty-color-yellow
+                   alacritty-color-blue
+                   alacritty-color-magenta
+                   alacritty-color-cyan
+                   alacritty-color-white
+                   alacritty-color-bright-black
+                   alacritty-color-bright-red
+                   alacritty-color-bright-green
+                   alacritty-color-bright-yellow
+                   alacritty-color-bright-blue
+                   alacritty-color-bright-magenta
+                   alacritty-color-bright-cyan
+                   alacritty-color-bright-white)))
+      (cl-loop for face in faces
+               for color in colors
+               when color
+               do (set-face-attribute face nil
+                                      :foreground color
+                                      :background color)))))
 
 (defface alacritty-color-black
   '((t :foreground "black" :background "black"))
@@ -365,6 +454,46 @@ or call `alacritty--setup-keymap' for changes to take effect."
 (defface alacritty-color-white
   '((t :foreground "white" :background "white"))
   "Face for white color."
+  :group 'alacritty)
+
+(defface alacritty-color-bright-black
+  '((t :foreground "gray50" :background "gray50"))
+  "Face for bright black color."
+  :group 'alacritty)
+
+(defface alacritty-color-bright-red
+  '((t :foreground "red" :background "red"))
+  "Face for bright red color."
+  :group 'alacritty)
+
+(defface alacritty-color-bright-green
+  '((t :foreground "green" :background "green"))
+  "Face for bright green color."
+  :group 'alacritty)
+
+(defface alacritty-color-bright-yellow
+  '((t :foreground "yellow" :background "yellow"))
+  "Face for bright yellow color."
+  :group 'alacritty)
+
+(defface alacritty-color-bright-blue
+  '((t :foreground "blue" :background "blue"))
+  "Face for bright blue color."
+  :group 'alacritty)
+
+(defface alacritty-color-bright-magenta
+  '((t :foreground "magenta" :background "magenta"))
+  "Face for bright magenta color."
+  :group 'alacritty)
+
+(defface alacritty-color-bright-cyan
+  '((t :foreground "cyan" :background "cyan"))
+  "Face for bright cyan color."
+  :group 'alacritty)
+
+(defface alacritty-color-bright-white
+  '((t :foreground "white" :background "white"))
+  "Face for bright white color."
   :group 'alacritty)
 
 ;; Buffer-local variables
@@ -588,6 +717,25 @@ This is set to t when the first OSC 51;A sequence is received from the shell.")
   "Get the current window size in columns and lines."
   (cons (window-body-width) (window-body-height)))
 
+(defun alacritty--update-cursor-shape ()
+  "Update Emacs cursor shape to match terminal cursor shape."
+  (when (and alacritty-use-cursor-shape alacritty--term)
+    (let* ((style (alacritty--module-cursor-style alacritty--term))
+           (shape (car style))
+           (_blinking (cdr style)))
+      ;; Set cursor type based on shape
+      (setq cursor-type
+            (pcase shape
+              ('block 'box)
+              ('hollow-block 'hollow)
+              ('underline '(hbar . 3))
+              ('beam 'bar)
+              ('hidden nil)
+              (_ 'box)))
+      ;; Note: Emacs doesn't have native support for cursor blinking control
+      ;; per buffer, so we ignore the blinking flag for now
+      )))
+
 (defun alacritty--do-render ()
   "Perform the actual rendering of terminal content to the buffer.
 Uses damage tracking to only redraw changed portions when possible.
@@ -627,6 +775,8 @@ Now includes scrollback history in normal mode (like vterm)."
                      (w (if c (char-width c) 1)))
                 (setq visual-col (+ visual-col w))
                 (forward-char 1))))
+          ;; Update cursor shape to match terminal
+          (alacritty--update-cursor-shape)
           ;; Recenter to keep cursor visible at bottom of window (like a terminal)
           (when (eq (current-buffer) (window-buffer))
             (let* ((win-height (window-body-height))
@@ -835,8 +985,8 @@ STR is the command string, which may include quoted arguments."
     (let ((buf (current-buffer)))
       (dolist (win (window-list frame 'no-minibuf))
         (when (eq (window-buffer win) buf)
-          (let* ((width (window-body-width win))
-                 (height (window-body-height win)))
+          (let* ((width (max (window-body-width win) alacritty-min-window-width))
+                 (height (max (window-body-height win) alacritty-min-window-height)))
             (alacritty--module-resize alacritty--term width height)
             ;; Also tell Emacs to resize the PTY
             (set-process-window-size alacritty--process height width)
@@ -920,12 +1070,15 @@ Must be called after the buffer is displayed in a window.
 If `default-directory' is a Tramp remote path, starts the shell
 on the remote host using Tramp's file handlers."
   (let* ((size (alacritty--get-window-size))
+         ;; Apply minimum size constraints
+         (width (max (car size) alacritty-min-window-width))
+         (height (max (cdr size) alacritty-min-window-height))
          (shell (alacritty--get-shell))
          ;; Handle FreeBSD which doesn't support iutf8
          (iutf8-arg (if (eq system-type 'berkeley-unix) "" "iutf8")))
     ;; Create terminal state (no PTY - Emacs will handle that)
     (setq alacritty--term
-          (alacritty--module-create (car size) (cdr size)
+          (alacritty--module-create width height
                                     alacritty-max-scrollback))
     ;; Create process with PTY
     ;; The :file-handler t option makes Emacs use Tramp's file handlers
@@ -935,10 +1088,10 @@ on the remote host using Tramp's file handlers."
           (make-process
            :name "alacritty"
            :buffer (current-buffer)
-           :command `("/bin/sh" "-c"
-                      ,(format "stty -nl sane %s erase ^? rows %d columns %d >/dev/null && exec %s"
-                               iutf8-arg
-                               (cdr size) (car size) shell))
+            :command `("/bin/sh" "-c"
+                       ,(format "stty -nl sane %s erase ^? rows %d columns %d >/dev/null && exec %s"
+                                iutf8-arg
+                                height width shell))
            :connection-type 'pty
            :file-handler t
            :filter #'alacritty--filter
@@ -991,6 +1144,8 @@ on the remote host using Tramp's file handlers."
   (setq-local auto-hscroll-mode 'current-line)
   (setq-local bookmark-make-record-function #'alacritty--bookmark-make-record)
   (add-hook 'kill-buffer-hook #'alacritty--cleanup nil t)
+  ;; Apply custom color palette if set
+  (alacritty--apply-color-palette)
   (setenv "TERM" "xterm-256color")
   (setenv "COLORTERM" "truecolor")
   (setenv "INSIDE_EMACS" "alacritty"))
@@ -1104,11 +1259,48 @@ ARG is passed to `yank-pop'."
       (alacritty--insert-for-yank primary))))
 
 (defun alacritty-send-next-key ()
-  "Read the next key and send it to the terminal."
+  "Read the next key sequence and send it to the terminal.
+This includes modifier keys (Control, Meta, Shift) and function keys."
   (interactive)
-  (let ((key (read-key "Send key: ")))
-    (when (characterp key)
-      (alacritty--send-string (char-to-string key)))))
+  (let* ((key-seq (read-key-sequence "Send key: "))
+         (key (aref key-seq 0)))
+    (cond
+     ;; Handle character keys with modifiers
+     ((characterp key)
+      (let ((mods (event-modifiers key))
+            (basic (event-basic-type key)))
+        (cond
+         ;; Control modifier
+         ((and (memq 'control mods) (characterp basic))
+          (alacritty--send-char basic "C"))
+         ;; Meta modifier
+         ((and (memq 'meta mods) (characterp basic))
+          (alacritty--send-char basic "M"))
+         ;; Shift + Control
+         ((and (memq 'shift mods) (memq 'control mods) (characterp basic))
+          (alacritty--send-char basic "CS"))
+         ;; Plain character
+         (t
+          (alacritty--send-string (char-to-string basic))))))
+     ;; Handle special keys (arrows, function keys, etc.)
+     ((symbolp key)
+      (let ((key-name (symbol-name key))
+            (_mods (event-modifiers key)))
+        (cond
+         ;; Function keys
+         ((string-match "^f\\([0-9]+\\)$" key-name)
+          (alacritty--send-key key-name))
+         ;; Arrow keys
+         ((member key '(up down left right))
+          (alacritty--send-key (symbol-name key)))
+         ;; Other special keys
+         ((member key '(home end prior next insert delete backspace tab return))
+          (alacritty--send-key (symbol-name key)))
+         ;; Default: try to send as-is
+         (t
+          (message "Unknown key: %s" key)))))
+     (t
+      (message "Cannot send key: %s" key)))))
 
 ;; Copy mode
 

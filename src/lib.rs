@@ -10,7 +10,7 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags as CellFlags;
 use alacritty_terminal::term::{Config, Term, TermDamage, TermMode};
-use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor};
+use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor};
 use emacs::{defun, Env, IntoLisp, Result, Value};
 use parking_lot::Mutex;
 
@@ -555,6 +555,32 @@ fn app_cursor_mode(term: &AlacrittyTerm) -> Result<bool> {
 #[defun(name = "alacritty--module-bracketed-paste-mode")]
 fn bracketed_paste_mode(term: &AlacrittyTerm) -> Result<bool> {
     Ok(term.get_mode().contains(TermMode::BRACKETED_PASTE))
+}
+
+/// Get cursor style information
+/// Returns a cons cell: (SHAPE . BLINKING)
+/// where SHAPE is one of: 'block, 'underline, 'beam, 'hollow-block, or 'hidden
+/// and BLINKING is t or nil
+#[defun(name = "alacritty--module-cursor-style")]
+fn cursor_style<'e>(env: &'e Env, term: &AlacrittyTerm) -> Result<Value<'e>> {
+    let term_lock = term.term.lock();
+    let style = term_lock.cursor_style();
+
+    let shape_sym = match style.shape {
+        CursorShape::Block => env.intern("block")?,
+        CursorShape::Underline => env.intern("underline")?,
+        CursorShape::Beam => env.intern("beam")?,
+        CursorShape::HollowBlock => env.intern("hollow-block")?,
+        CursorShape::Hidden => env.intern("hidden")?,
+    };
+
+    let blinking_val = if style.blinking {
+        env.intern("t")?
+    } else {
+        env.intern("nil")?
+    };
+
+    env.cons(shape_sym, blinking_val)
 }
 
 /// Get prompt positions for prompt navigation
