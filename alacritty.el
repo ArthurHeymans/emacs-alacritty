@@ -291,6 +291,40 @@ When nil, fall back to `term-prompt-regexp' for prompt detection."
   :type 'boolean
   :group 'alacritty)
 
+(defcustom alacritty-enable-osc52-clipboard nil
+  "When non-nil, enable OSC 52 clipboard manipulation.
+
+OSC 52 allows terminal applications to read from and write to
+the system clipboard.  For example, tmux can share its copy buffer
+with Emacs via:
+  set -g set-clipboard on
+
+When enabled, escape sequences like \\='\\e]52;c;BASE64-DATA\\a\\='
+will set the kill ring and optionally the system clipboard.
+
+This is disabled by default for security reasons, as malicious
+terminal output could potentially manipulate your clipboard."
+  :type 'boolean
+  :group 'alacritty)
+
+(defcustom alacritty-keymap-exceptions
+  '("C-c" "C-x" "C-u" "C-g" "C-h" "M-x" "M-o" "C-y" "M-y")
+  "Key sequences that should be passed to Emacs instead of the terminal.
+
+These keys will invoke Emacs commands rather than being sent to
+the terminal.  This is useful for prefix keys and essential Emacs
+bindings.
+
+Note: After modifying this variable, you may need to restart Emacs
+or call `alacritty--setup-keymap' for changes to take effect."
+  :type '(repeat string)
+  :set (lambda (sym val)
+         (set sym val)
+         (when (and (fboundp 'alacritty--setup-keymap)
+                    (boundp 'alacritty-mode-map))
+           (alacritty--setup-keymap)))
+  :group 'alacritty)
+
 ;; Faces for terminal colors
 
 (defface alacritty-color-black
@@ -359,7 +393,11 @@ This is set to t when the first OSC 51;A sequence is received from the shell.")
 
 ;; Mode map
 
-(defvar alacritty-mode-map
+(defvar alacritty-mode-map nil
+  "Keymap for `alacritty-mode'.")
+
+(defun alacritty--setup-keymap ()
+  "Set up the keymap for alacritty-mode, respecting `alacritty-keymap-exceptions'."
   (let ((map (make-sparse-keymap)))
     (define-key map [remap self-insert-command] #'alacritty--self-insert)
     
@@ -398,39 +436,50 @@ This is set to t when the first OSC 51;A sequence is received from the shell.")
     (define-key map (kbd "<f11>") (lambda () (interactive) (alacritty--send-key "f11")))
     (define-key map (kbd "<f12>") (lambda () (interactive) (alacritty--send-key "f12")))
     
-    ;; Control keys
-    (define-key map (kbd "C-a") (lambda () (interactive) (alacritty--send-char ?a "C")))
-    (define-key map (kbd "C-b") (lambda () (interactive) (alacritty--send-char ?b "C")))
-    (define-key map (kbd "C-c C-c") (lambda () (interactive) (alacritty--send-char ?c "C")))
-    (define-key map (kbd "C-d") (lambda () (interactive) (alacritty--send-char ?d "C")))
-    (define-key map (kbd "C-e") (lambda () (interactive) (alacritty--send-char ?e "C")))
-    (define-key map (kbd "C-f") (lambda () (interactive) (alacritty--send-char ?f "C")))
-    (define-key map (kbd "C-g") (lambda () (interactive) (alacritty--send-char ?g "C")))
-    (define-key map (kbd "C-k") (lambda () (interactive) (alacritty--send-char ?k "C")))
-    (define-key map (kbd "C-l") (lambda () (interactive) (alacritty--send-char ?l "C")))
-    (define-key map (kbd "C-n") (lambda () (interactive) (alacritty--send-char ?n "C")))
-    (define-key map (kbd "C-p") (lambda () (interactive) (alacritty--send-char ?p "C")))
-    (define-key map (kbd "C-r") (lambda () (interactive) (alacritty--send-char ?r "C")))
-    (define-key map (kbd "C-t") (lambda () (interactive) (alacritty--send-char ?t "C")))
-    (define-key map (kbd "C-u") (lambda () (interactive) (alacritty--send-char ?u "C")))
-    (define-key map (kbd "C-w") (lambda () (interactive) (alacritty--send-char ?w "C")))
-    (define-key map (kbd "C-y") #'alacritty-yank)
-    (define-key map (kbd "M-y") #'alacritty-yank-pop)
-    (define-key map (kbd "C-z") (lambda () (interactive) (alacritty--send-char ?z "C")))
+    ;; Mouse bindings
     (define-key map [mouse-2] #'alacritty-yank-primary)
     (define-key map [remap mouse-yank-primary] #'alacritty-yank-primary)
     
-    ;; Emacs-specific commands
+    ;; Emacs-specific commands (C-c prefix commands)
+    (define-key map (kbd "C-c C-c") (lambda () (interactive) (alacritty--send-char ?c "C")))
     (define-key map (kbd "C-c C-t") #'alacritty-copy-mode)
     (define-key map (kbd "C-c C-l") #'alacritty-clear-scrollback)
     (define-key map (kbd "C-c C-r") #'alacritty-redraw)
     (define-key map (kbd "C-c C-q") #'alacritty-send-next-key)
-    ;; Prompt navigation
     (define-key map (kbd "C-c C-n") #'alacritty-next-prompt)
     (define-key map (kbd "C-c C-p") #'alacritty-previous-prompt)
     
-    map)
-  "Keymap for `alacritty-mode'.")
+    ;; Add control key bindings, excluding those in alacritty-keymap-exceptions
+    (dolist (char (number-sequence ?a ?z))
+      (let ((key (format "C-%c" char)))
+        (unless (member key alacritty-keymap-exceptions)
+          (define-key map (kbd key)
+            (let ((c char))
+              (lambda () (interactive) (alacritty--send-char c "C")))))))
+    
+    ;; Add Meta key bindings, excluding those in alacritty-keymap-exceptions
+    (dolist (char (number-sequence ?a ?z))
+      (let ((key (format "M-%c" char)))
+        (unless (member key alacritty-keymap-exceptions)
+          (define-key map (kbd key)
+            (let ((c char))
+              (lambda () (interactive) (alacritty--send-char c "M")))))))
+    
+    ;; Remap yank commands to alacritty versions (works even if C-y/M-y are exceptions)
+    (define-key map [remap yank] #'alacritty-yank)
+    (define-key map [remap yank-pop] #'alacritty-yank-pop)
+    
+    ;; Remove exception key bindings so they fall through to global map
+    ;; (which will then be remapped by the above)
+    (dolist (key alacritty-keymap-exceptions)
+      ;; Skip C-c which is our prefix key for alacritty commands
+      (unless (string= key "C-c")
+        (define-key map (kbd key) nil)))
+    
+    (setq alacritty-mode-map map)))
+
+;; Initialize the keymap
+(alacritty--setup-keymap)
 
 (defvar alacritty-copy-mode-map
   (let ((map (make-sparse-keymap)))
@@ -641,9 +690,14 @@ EVENTS is a list of (type . data) pairs."
       ('bell
        (ding))
       ('clipboard-store
-       (kill-new (cdr event)))
+       ;; OSC 52 clipboard store - only process if enabled
+       (when alacritty-enable-osc52-clipboard
+         (kill-new (cdr event))
+         (message "Clipboard updated via OSC 52")))
       ('clipboard-load
-       (when (current-kill 0 t)
+       ;; OSC 52 clipboard load - only process if enabled
+       (when (and alacritty-enable-osc52-clipboard
+                  (current-kill 0 t))
          (alacritty--send-string (current-kill 0))))
       ('cursor-blink-change
        (unless alacritty-ignore-blink-cursor
@@ -1090,16 +1144,37 @@ START-LINE is the 1-indexed line number where the text starts."
     (alacritty--do-render)
     (message "Copy mode disabled.")))
 
-(defun alacritty-copy-mode-done ()
-  "Exit copy mode, copying the selection if active."
-  (interactive)
-  (when (use-region-p)
-    (let* ((beg (region-beginning))
-           (end (region-end))
-           (start-line (line-number-at-pos beg))
+(defun alacritty-copy-mode-done (&optional arg)
+  "Exit copy mode, copying the selection or current line to the kill ring.
+
+If a region is active, copy the region.  Otherwise, copy the current line
+from the beginning of the line to the end, respecting line wraps.
+
+The option `alacritty-copy-exclude-prompt' controls whether the prompt
+should be included when copying a line.  Using the universal prefix ARG
+will invert this behavior for the current invocation."
+  (interactive "P")
+  (unless alacritty--copy-mode
+    (user-error "This command is only effective in copy mode"))
+  (let ((beg (if (use-region-p)
+                 (region-beginning)
+               ;; No region - copy current line
+               (let ((line-start (alacritty--get-beginning-of-line)))
+                 ;; Should we exclude the prompt?
+                 (if (or (and alacritty-copy-exclude-prompt (not arg))
+                         (and (not alacritty-copy-exclude-prompt) arg))
+                     ;; Exclude prompt: start from prompt end or line start
+                     (max (or (alacritty--get-prompt-point) line-start)
+                          line-start)
+                   line-start))))
+        (end (if (use-region-p)
+                 (region-end)
+               (alacritty--get-end-of-line))))
+    (let* ((start-line (line-number-at-pos beg))
            (text (buffer-substring-no-properties beg end))
            (filtered-text (alacritty--remove-fake-newlines text start-line)))
-      (kill-new filtered-text)))
+      (kill-new filtered-text)
+      (message "Copied: %s" (truncate-string-to-width filtered-text 40 nil nil "..."))))
   (deactivate-mark)
   (alacritty-copy-mode))
 

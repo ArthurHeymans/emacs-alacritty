@@ -151,6 +151,13 @@ end
 
 ;; Exclude prompt when copying current line (default: t)
 (setq alacritty-copy-exclude-prompt t)
+
+;; Enable OSC 52 clipboard manipulation (default: nil for security)
+(setq alacritty-enable-osc52-clipboard t)
+
+;; Keys that bypass the terminal and go to Emacs
+(setq alacritty-keymap-exceptions
+      '("C-c" "C-x" "C-u" "C-g" "C-h" "M-x" "M-o" "C-y" "M-y"))
 ```
 
 ### Exit hook
@@ -200,14 +207,11 @@ This section compares emacs-alacritty with [vterm](https://github.com/akermu/ema
 |---------|-------|--------------|----------|
 | **Prompt tracking** | Yes - marks prompt regions with text properties | No - only directory tracking via title | High |
 | **Prompt navigation** | `C-c C-n` / `C-c C-p` to jump between prompts | Not implemented | High |
-| **OSC 52 clipboard** | Full support with security toggle | Basic clipboard via events | Medium |
-| **vterm-eval-cmds whitelist** | Configurable command whitelist for security | Documented but not fully implemented | Medium |
 | **Scrollback in normal mode** | Visible scrollback with prompt navigation | Only visible in copy mode | Medium |
 | **vterm-send-next-key** | Sends any key including modifiers | Basic implementation | Low |
 | **Cursor shape/style** | Supports block, bar, underline | Not exposed to Emacs | Low |
 | **Multi-vterm support** | Mature ecosystem (multi-vterm, vterm-toggle) | Basic multi-buffer support | Low |
 | **Color palette customization** | `vterm-color-palette` with 16 named colors | Basic face definitions | Low |
-| **Keyboard exceptions** | `vterm-keymap-exceptions` list | Hardcoded C-c, C-x prefixes | Low |
 | **Window size minimum** | `vterm-min-window-width` | Not implemented | Low |
 
 ### Feature parity checklist
@@ -225,10 +229,10 @@ This section compares emacs-alacritty with [vterm](https://github.com/akermu/ema
 - [x] Exit hooks
 - [x] Prompt tracking and navigation
 - [ ] Scrollback visible in normal mode
-- [ ] OSC 52 clipboard manipulation
+- [x] OSC 52 clipboard manipulation
 - [x] Eval command whitelist security
 - [ ] Cursor shape control
-- [ ] Configurable keyboard exceptions
+- [x] Configurable keyboard exceptions
 - [ ] Color palette customization
 
 ## Improvement Plan
@@ -252,20 +256,22 @@ The following improvements are planned to reach feature parity with vterm. Items
    - Parse OSC 51;E sequences and dispatch to whitelisted functions
    - Default whitelist includes: `find-file`, `message`, `alacritty-clear-scrollback`
 
-### Phase 2: Polish (Medium Priority)
+### Phase 2: Polish (Medium Priority) - COMPLETED
 
-4. **OSC 52 clipboard support**
-   - Add `alacritty-enable-manipulate-selection-data-by-osc52` option
-   - Implement clipboard load/store via OSC 52 sequences
-   - Default to disabled for security
+4. **OSC 52 clipboard support** ✓
+   - Added `alacritty-enable-osc52-clipboard` option (disabled by default for security)
+   - Clipboard store/load via OSC 52 sequences
+   - Message shown when clipboard is updated via OSC 52
 
-5. **Improved copy mode**
-   - Add `alacritty-copy-exclude-prompt` option
-   - Better integration with isearch
+5. **Improved copy mode** ✓
+   - `alacritty-copy-exclude-prompt` option controls whether prompt is included
+   - `alacritty-copy-mode-done` now copies current line if no region is active
+   - Prefix argument inverts the exclude-prompt behavior
 
-6. **Configurable keyboard exceptions**
-   - Add `alacritty-keymap-exceptions` customization variable
-   - Allow users to choose which key prefixes bypass the terminal
+6. **Configurable keyboard exceptions** ✓
+   - Added `alacritty-keymap-exceptions` customization variable
+   - Default exceptions: `C-c`, `C-x`, `C-u`, `C-g`, `C-h`, `M-x`, `M-o`, `C-y`, `M-y`
+   - Dynamically regenerates keymap when exceptions change
 
 ### Phase 3: Nice-to-Have (Low Priority)
 
