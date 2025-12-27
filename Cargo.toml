@@ -13,3 +13,5 @@ alacritty_terminal = "0.25.1"
 emacs = "0.19.0"
 parking_lot = "0.12"
 log = "0.4"
+vte = { version = "0.15.0", features = ["ansi", "std"] }
+unicode-width = "0.2"

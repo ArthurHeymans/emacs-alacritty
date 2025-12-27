@@ -1,21 +1,18 @@
 //! Alacritty Terminal for Emacs - Terminal emulator for Emacs using alacritty_terminal
 //!
 //! This module provides a terminal emulator for Emacs using the alacritty_terminal
-//! library, similar to vterm but using Alacritty's terminal emulation.
+//! library. Unlike the previous implementation, this version does NOT create its own
+//! PTY - instead, Emacs creates the PTY via make-process and feeds data to us via
+//! a process filter. This eliminates polling and matches vterm's architecture.
 
-use alacritty_terminal::event::{Event, EventListener, WindowSize};
-use alacritty_terminal::event_loop::{EventLoop, Msg, Notifier};
+use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
-use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::Flags as CellFlags;
-use alacritty_terminal::term::{Config, Term, TermDamage, TermMode};
-use alacritty_terminal::tty::{self, Options as PtyOptions, Shell};
-use alacritty_terminal::vte::ansi::{Color, NamedColor};
+use alacritty_terminal::term::{Config, Term, TermMode};
+use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor};
 use emacs::{defun, Env, IntoLisp, Result, Value};
 use parking_lot::Mutex;
-use std::borrow::Cow;
-use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 
 emacs::plugin_is_GPL_compatible!();
@@ -25,18 +22,11 @@ emacs::plugin_is_GPL_compatible!();
 struct TermSize {
     cols: usize,
     lines: usize,
-    cell_width: u16,
-    cell_height: u16,
 }
 
 impl TermSize {
     fn new(cols: usize, lines: usize) -> Self {
-        Self {
-            cols,
-            lines,
-            cell_width: 10,  // Default cell width in pixels
-            cell_height: 20, // Default cell height in pixels
-        }
+        Self { cols, lines }
     }
 }
 
@@ -52,211 +42,108 @@ impl Dimensions for TermSize {
     }
 }
 
-impl From<TermSize> for WindowSize {
-    fn from(size: TermSize) -> Self {
-        WindowSize {
-            num_cols: size.cols as u16,
-            num_lines: size.lines as u16,
-            cell_width: size.cell_width,
-            cell_height: size.cell_height,
-        }
-    }
-}
-
-/// Events sent from the terminal to Emacs
+/// Events collected during terminal processing
 #[derive(Debug, Clone)]
 pub enum TermEvent {
     Title(String),
     Bell,
-    Exit,
     ClipboardStore(String),
     ClipboardLoad,
-    ColorRequest(usize),
     CursorBlinkingChange,
-    Wakeup,
+    PtyWrite(String),
 }
 
-/// Event listener that collects events to be processed by Emacs
-/// and writes PTY responses back immediately
-#[derive(Clone)]
-struct EmacEventListener {
-    sender: Sender<TermEvent>,
-    pty_writer: Sender<Msg>,
+/// Event listener that collects events to be returned to Emacs
+#[derive(Clone, Default)]
+struct EmacsEventListener {
+    events: Arc<Mutex<Vec<TermEvent>>>,
 }
 
-impl EmacEventListener {
-    fn new(sender: Sender<TermEvent>, pty_writer: Sender<Msg>) -> Self {
-        Self { sender, pty_writer }
+impl EmacsEventListener {
+    fn new() -> Self {
+        Self {
+            events: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn take_events(&self) -> Vec<TermEvent> {
+        std::mem::take(&mut *self.events.lock())
     }
 }
 
-impl EventListener for EmacEventListener {
+impl EventListener for EmacsEventListener {
     fn send_event(&self, event: Event) {
+        let mut events = self.events.lock();
         match event {
-            Event::Title(title) => {
-                let _ = self.sender.send(TermEvent::Title(title));
-            }
-            Event::Bell => {
-                let _ = self.sender.send(TermEvent::Bell);
-            }
-            Event::Exit => {
-                let _ = self.sender.send(TermEvent::Exit);
-            }
-            Event::ClipboardStore(_, data) => {
-                let _ = self.sender.send(TermEvent::ClipboardStore(data));
-            }
-            Event::ClipboardLoad(_, _) => {
-                let _ = self.sender.send(TermEvent::ClipboardLoad);
-            }
-            Event::ColorRequest(idx, _) => {
-                let _ = self.sender.send(TermEvent::ColorRequest(idx));
-            }
-            Event::PtyWrite(data) => {
-                // Write PTY responses (like DA1 response) immediately back to PTY
-                let _ = self
-                    .pty_writer
-                    .send(Msg::Input(Cow::Owned(data.into_bytes())));
-            }
-            Event::CursorBlinkingChange => {
-                let _ = self.sender.send(TermEvent::CursorBlinkingChange);
-            }
-            Event::Wakeup => {
-                let _ = self.sender.send(TermEvent::Wakeup);
-            }
+            Event::Title(title) => events.push(TermEvent::Title(title)),
+            Event::Bell => events.push(TermEvent::Bell),
+            Event::ClipboardStore(_, data) => events.push(TermEvent::ClipboardStore(data)),
+            Event::ClipboardLoad(_, _) => events.push(TermEvent::ClipboardLoad),
+            Event::CursorBlinkingChange => events.push(TermEvent::CursorBlinkingChange),
+            Event::PtyWrite(data) => events.push(TermEvent::PtyWrite(data)),
             _ => {}
         }
     }
 }
 
-/// The main terminal structure holding all terminal state
+/// The main terminal structure - no PTY, no event loop
+/// Emacs owns the PTY and feeds us data via process filter
 pub struct AlacrittyTerm {
-    term: Arc<FairMutex<Term<EmacEventListener>>>,
-    pty_tx: Notifier,
-    event_rx: Receiver<TermEvent>,
+    term: Arc<Mutex<Term<EmacsEventListener>>>,
+    processor: Mutex<Processor>,
+    event_listener: EmacsEventListener,
     size: Mutex<TermSize>,
     title: Mutex<String>,
-    exited: Mutex<bool>,
-    /// Simple dirty flag - set when we receive Wakeup events
-    /// The actual damage tracking is done by alacritty_terminal internally
-    dirty: Arc<Mutex<bool>>,
+    dirty: Mutex<bool>,
 }
 
 impl AlacrittyTerm {
-    fn new(
-        cols: usize,
-        lines: usize,
-        shell: Option<String>,
-        scrollback_lines: usize,
-    ) -> std::result::Result<Self, String> {
+    fn new(cols: usize, lines: usize, scrollback_lines: usize) -> Self {
         let size = TermSize::new(cols, lines);
-        let (event_tx, event_rx) = channel();
+        let event_listener = EmacsEventListener::new();
 
-        // Setup PTY options
-        // The shell parameter can be either:
-        // 1. A simple shell path like "/bin/bash"
-        // 2. A complex command like "ssh user@host -t 'cd /path && exec /bin/bash'"
-        // For complex commands (containing spaces), we wrap with /bin/sh -c
-        let shell_cmd = shell
-            .unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()));
-
-        let (shell_program, shell_args) = if shell_cmd.contains(' ') {
-            // Complex command - wrap with sh -c
-            ("/bin/sh".to_string(), vec!["-c".to_string(), shell_cmd])
-        } else {
-            // Simple shell path
-            (shell_cmd, vec![])
-        };
-
-        let pty_config = PtyOptions {
-            shell: Some(Shell::new(shell_program, shell_args)),
-            working_directory: None,
-            ..Default::default()
-        };
-
-        // Create the PTY first
-        let window_size = WindowSize::from(size);
-        let pty = tty::new(&pty_config, window_size, 0)
-            .map_err(|e| format!("Failed to create PTY: {}", e))?;
-
-        // We need to create a dummy event listener first, then update it
-        // Actually, let's use a channel-based approach where we forward PTY writes
-        let (pty_write_tx, pty_write_rx) = channel::<Msg>();
-
-        // Create the event listener with the PTY write channel
-        let event_listener = EmacEventListener::new(event_tx, pty_write_tx);
-
-        // Create the terminal with custom scrollback size
         let config = Config {
             scrolling_history: scrollback_lines,
             ..Config::default()
         };
+
         let term = Term::new(config, &size, event_listener.clone());
-        let term = Arc::new(FairMutex::new(term));
 
-        // Create and spawn the event loop
-        let event_loop = EventLoop::new(term.clone(), event_listener, pty, false, false)
-            .map_err(|e| format!("Failed to create event loop: {}", e))?;
-
-        let pty_channel = event_loop.channel();
-        let pty_tx = Notifier(pty_channel.clone());
-
-        // Spawn the event loop in a background thread
-        let _event_loop_handle = event_loop.spawn();
-
-        // Spawn a thread to forward PTY write requests from the event listener
-        // to the actual PTY channel
-        std::thread::spawn(move || {
-            while let Ok(msg) = pty_write_rx.recv() {
-                let _ = pty_channel.send(msg);
-            }
-        });
-
-        Ok(Self {
-            term,
-            pty_tx,
-            event_rx,
+        Self {
+            term: Arc::new(Mutex::new(term)),
+            processor: Mutex::new(Processor::new()),
+            event_listener,
             size: Mutex::new(size),
             title: Mutex::new(String::new()),
-            exited: Mutex::new(false),
-            dirty: Arc::new(Mutex::new(true)), // Start dirty to trigger initial render
-        })
+            dirty: Mutex::new(true),
+        }
     }
 
-    fn write(&self, data: &[u8]) {
-        let _ = self.pty_tx.0.send(Msg::Input(Cow::Owned(data.to_vec())));
+    /// Process input bytes from the PTY (called from Emacs process filter)
+    /// This is the key function - it feeds data to the terminal parser
+    fn process_bytes(&self, bytes: &[u8]) {
+        let mut term = self.term.lock();
+        let mut processor = self.processor.lock();
+        processor.advance(&mut *term, bytes);
+        *self.dirty.lock() = true;
     }
 
     fn resize(&self, cols: usize, lines: usize) {
         let mut size = self.size.lock();
         size.cols = cols;
         size.lines = lines;
-
-        let window_size = WindowSize::from(*size);
         self.term.lock().resize(*size);
-        let _ = self.pty_tx.0.send(Msg::Resize(window_size));
-
-        // Mark as dirty after resize
         *self.dirty.lock() = true;
     }
 
-    fn process_events(&self) -> Vec<TermEvent> {
-        let mut events = Vec::new();
-        while let Ok(event) = self.event_rx.try_recv() {
-            match &event {
-                TermEvent::Title(title) => {
-                    *self.title.lock() = title.clone();
-                }
-                TermEvent::Exit => {
-                    *self.exited.lock() = true;
-                }
-                TermEvent::Wakeup => {
-                    // Terminal content has changed, mark as dirty
-                    // alacritty_terminal tracks actual damage internally via Term::damage()
-                    *self.dirty.lock() = true;
-                }
-                _ => {}
+    /// Take collected events (title changes, bell, clipboard, pty writes)
+    fn take_events(&self) -> Vec<TermEvent> {
+        let events = self.event_listener.take_events();
+        // Update title cache
+        for event in &events {
+            if let TermEvent::Title(title) = event {
+                *self.title.lock() = title.clone();
             }
-            events.push(event);
         }
         events
     }
@@ -269,77 +156,9 @@ impl AlacrittyTerm {
         *self.dirty.lock() = false;
     }
 
-    /// Get status and process events in one call to reduce FFI overhead
-    /// Returns (is_dirty, is_exited, events_for_elisp)
-    /// where events_for_elisp only contains events that need Elisp handling
-    /// (title, bell, clipboard) - wakeup/exit are handled internally
-    fn get_status_and_process_events(&self) -> (bool, bool, Vec<TermEvent>) {
-        // Process events first
-        let mut events_for_elisp = Vec::new();
-        while let Ok(event) = self.event_rx.try_recv() {
-            match &event {
-                TermEvent::Title(title) => {
-                    *self.title.lock() = title.clone();
-                    events_for_elisp.push(event);
-                }
-                TermEvent::Exit => {
-                    *self.exited.lock() = true;
-                }
-                TermEvent::Wakeup => {
-                    *self.dirty.lock() = true;
-                }
-                TermEvent::Bell | TermEvent::ClipboardStore(_) | TermEvent::ClipboardLoad | TermEvent::CursorBlinkingChange => {
-                    events_for_elisp.push(event);
-                }
-                _ => {}
-            }
-        }
-        
-        let is_dirty = *self.dirty.lock();
-        let is_exited = *self.exited.lock();
-        
-        (is_dirty, is_exited, events_for_elisp)
-    }
-
-    fn get_content(&self) -> String {
-        let term = self.term.lock();
-        let grid = term.grid();
-        let mut result = String::new();
-
-        // In alacritty_terminal, Line(0) is the topmost visible line
-        // and the grid uses negative indices for scrollback
-        for line_idx in 0..grid.screen_lines() {
-            let row = &grid[Line(line_idx as i32)];
-            let mut line_str = String::new();
-            for col_idx in 0..grid.columns() {
-                let cell = &row[Column(col_idx)];
-                // Skip wide character spacer cells
-                if cell.flags.contains(CellFlags::WIDE_CHAR_SPACER) {
-                    continue;
-                }
-                let c = cell.c;
-                // Replace null chars with spaces for display
-                if c == '\0' || c == ' ' {
-                    line_str.push(' ');
-                } else {
-                    line_str.push(c);
-                }
-            }
-            // Trim trailing spaces from each line
-            let trimmed = line_str.trim_end();
-            result.push_str(trimmed);
-            if line_idx < grid.screen_lines() - 1 {
-                result.push('\n');
-            }
-        }
-
-        result
-    }
-
     fn cursor_position(&self) -> (usize, usize) {
         let term = self.term.lock();
         let cursor = term.grid().cursor.point;
-        // Line can be negative in alacritty (for scrollback), clamp to 0
         let line = if cursor.line.0 < 0 {
             0
         } else {
@@ -348,16 +167,12 @@ impl AlacrittyTerm {
         (line, cursor.column.0)
     }
 
-    fn is_exited(&self) -> bool {
-        *self.exited.lock()
-    }
-
     fn get_title(&self) -> String {
         self.title.lock().clone()
     }
 
     fn get_mode(&self) -> TermMode {
-        self.term.lock().mode().clone()
+        *self.term.lock().mode()
     }
 }
 
@@ -365,63 +180,56 @@ impl AlacrittyTerm {
 fn color_to_rgb(color: &Color) -> (u8, u8, u8) {
     match color {
         Color::Spec(rgb) => (rgb.r, rgb.g, rgb.b),
-        Color::Named(named) => {
-            // Return default colors for named colors
-            match named {
-                NamedColor::Black => (0, 0, 0),
-                NamedColor::Red => (205, 0, 0),
-                NamedColor::Green => (0, 205, 0),
-                NamedColor::Yellow => (205, 205, 0),
-                NamedColor::Blue => (0, 0, 238),
-                NamedColor::Magenta => (205, 0, 205),
-                NamedColor::Cyan => (0, 205, 205),
-                NamedColor::White => (229, 229, 229),
-                NamedColor::BrightBlack => (127, 127, 127),
-                NamedColor::BrightRed => (255, 0, 0),
-                NamedColor::BrightGreen => (0, 255, 0),
-                NamedColor::BrightYellow => (255, 255, 0),
-                NamedColor::BrightBlue => (92, 92, 255),
-                NamedColor::BrightMagenta => (255, 0, 255),
-                NamedColor::BrightCyan => (0, 255, 255),
-                NamedColor::BrightWhite => (255, 255, 255),
-                NamedColor::Foreground => (229, 229, 229),
-                NamedColor::Background => (0, 0, 0),
-                _ => (128, 128, 128), // Default gray for other cases
+        Color::Named(named) => match named {
+            NamedColor::Black => (0, 0, 0),
+            NamedColor::Red => (205, 0, 0),
+            NamedColor::Green => (0, 205, 0),
+            NamedColor::Yellow => (205, 205, 0),
+            NamedColor::Blue => (0, 0, 238),
+            NamedColor::Magenta => (205, 0, 205),
+            NamedColor::Cyan => (0, 205, 205),
+            NamedColor::White => (229, 229, 229),
+            NamedColor::BrightBlack => (127, 127, 127),
+            NamedColor::BrightRed => (255, 0, 0),
+            NamedColor::BrightGreen => (0, 255, 0),
+            NamedColor::BrightYellow => (255, 255, 0),
+            NamedColor::BrightBlue => (92, 92, 255),
+            NamedColor::BrightMagenta => (255, 0, 255),
+            NamedColor::BrightCyan => (0, 255, 255),
+            NamedColor::BrightWhite => (255, 255, 255),
+            NamedColor::Foreground => (229, 229, 229),
+            NamedColor::Background => (0, 0, 0),
+            _ => (128, 128, 128),
+        },
+        Color::Indexed(idx) => match idx {
+            0 => (0, 0, 0),
+            1 => (205, 0, 0),
+            2 => (0, 205, 0),
+            3 => (205, 205, 0),
+            4 => (0, 0, 238),
+            5 => (205, 0, 205),
+            6 => (0, 205, 205),
+            7 => (229, 229, 229),
+            8 => (127, 127, 127),
+            9 => (255, 0, 0),
+            10 => (0, 255, 0),
+            11 => (255, 255, 0),
+            12 => (92, 92, 255),
+            13 => (255, 0, 255),
+            14 => (0, 255, 255),
+            15 => (255, 255, 255),
+            16..=231 => {
+                let idx = idx - 16;
+                let r = (idx / 36) * 51;
+                let g = ((idx / 6) % 6) * 51;
+                let b = (idx % 6) * 51;
+                (r, g, b)
             }
-        }
-        Color::Indexed(idx) => {
-            // Basic 16-color palette mapping
-            match idx {
-                0 => (0, 0, 0),
-                1 => (205, 0, 0),
-                2 => (0, 205, 0),
-                3 => (205, 205, 0),
-                4 => (0, 0, 238),
-                5 => (205, 0, 205),
-                6 => (0, 205, 205),
-                7 => (229, 229, 229),
-                8 => (127, 127, 127),
-                9 => (255, 0, 0),
-                10 => (0, 255, 0),
-                11 => (255, 255, 0),
-                12 => (92, 92, 255),
-                13 => (255, 0, 255),
-                14 => (0, 255, 255),
-                15 => (255, 255, 255),
-                // Extended 256-color palette - simplified
-                16..=231 => {
-                    let idx = idx - 16;
-                    let r = (idx / 36) * 51;
-                    let g = ((idx / 6) % 6) * 51;
-                    let b = (idx % 6) * 51;
-                    (r, g, b)
-                }
-                232..=255 => {
-                    let gray = (idx - 232) * 10 + 8;
-                    (gray, gray, gray)
-                }
+            232..=255 => {
+                let gray = (idx - 232) * 10 + 8;
+                (gray, gray, gray)
             }
-        }
+        },
     }
 }
 
@@ -431,23 +239,22 @@ fn init(_env: &Env) -> Result<()> {
 }
 
 /// Create a new terminal with the given dimensions
-/// Returns a user pointer to the terminal state
+/// NOTE: This no longer spawns a PTY - Emacs will do that with make-process
 #[defun(user_ptr, name = "alacritty--module-create")]
-fn create(
-    cols: i64,
-    lines: i64,
-    shell: Option<String>,
-    scrollback: Option<i64>,
-) -> Result<AlacrittyTerm> {
+fn create(cols: i64, lines: i64, scrollback: Option<i64>) -> Result<AlacrittyTerm> {
     let scrollback_lines = scrollback.unwrap_or(10000) as usize;
-    AlacrittyTerm::new(cols as usize, lines as usize, shell, scrollback_lines)
-        .map_err(|e| emacs::Error::msg(e))
+    Ok(AlacrittyTerm::new(
+        cols as usize,
+        lines as usize,
+        scrollback_lines,
+    ))
 }
 
-/// Write data to the terminal PTY (send input to the shell)
-#[defun(name = "alacritty--module-write-input")]
-fn write_input(term: &AlacrittyTerm, data: String) -> Result<()> {
-    term.write(data.as_bytes());
+/// Process bytes from the PTY - called from Emacs process filter
+/// This is the main entry point for terminal data
+#[defun(name = "alacritty--module-process-bytes")]
+fn process_bytes(term: &AlacrittyTerm, data: String) -> Result<()> {
+    term.process_bytes(data.as_bytes());
     Ok(())
 }
 
@@ -458,61 +265,105 @@ fn resize(term: &AlacrittyTerm, cols: i64, lines: i64) -> Result<()> {
     Ok(())
 }
 
-/// Get the terminal content as a plain string
-#[defun(name = "alacritty--module-get-text")]
-fn get_text(term: &AlacrittyTerm) -> Result<String> {
-    Ok(term.get_content())
-}
+/// Take pending events and return them to Emacs
+/// Returns list of (type . data) pairs
+/// Types: title, bell, clipboard-store, clipboard-load, cursor-blink-change, pty-write
+#[defun(name = "alacritty--module-take-events")]
+fn take_events<'e>(env: &'e Env, term: &AlacrittyTerm) -> Result<Value<'e>> {
+    let events = term.take_events();
+    let nil = env.intern("nil")?;
+    let t = env.intern("t")?;
 
-/// Get the terminal content with styling information (visible screen only)
-/// Returns a list of lines, where each line is a list of styled segments:
-/// ((text fg-color bg-color bold italic underline) ...)
-#[defun(name = "alacritty--module-get-styled-content")]
-fn get_styled_content<'e>(env: &'e Env, term: &AlacrittyTerm) -> Result<Value<'e>> {
-    let term_lock = term.term.lock();
-    let grid = term_lock.grid();
-
-    let mut lines_list = env.intern("nil")?;
-
-    // Process lines in reverse order so we can build the list with cons
-    // Only process visible screen lines (0..screen_lines)
-    for line_idx in (0..grid.screen_lines()).rev() {
-        let row = &grid[Line(line_idx as i32)];
-        let segments_list = build_line_segments(env, row, grid.columns())?;
-        lines_list = env.cons(segments_list, lines_list)?;
+    let mut result = nil;
+    for event in events.into_iter().rev() {
+        let event_val = match event {
+            TermEvent::Title(title) => {
+                let sym = env.intern("title")?;
+                let val = title.into_lisp(env)?;
+                env.cons(sym, val)?
+            }
+            TermEvent::Bell => {
+                let sym = env.intern("bell")?;
+                env.cons(sym, t)?
+            }
+            TermEvent::ClipboardStore(data) => {
+                let sym = env.intern("clipboard-store")?;
+                let val = data.into_lisp(env)?;
+                env.cons(sym, val)?
+            }
+            TermEvent::ClipboardLoad => {
+                let sym = env.intern("clipboard-load")?;
+                env.cons(sym, t)?
+            }
+            TermEvent::CursorBlinkingChange => {
+                let sym = env.intern("cursor-blink-change")?;
+                let blink = term.term.lock().cursor_style().blinking;
+                env.cons(sym, if blink { t } else { nil })?
+            }
+            TermEvent::PtyWrite(data) => {
+                // This is data that should be written back to the PTY
+                // (e.g., terminal responses like DA1)
+                let sym = env.intern("pty-write")?;
+                let val = data.into_lisp(env)?;
+                env.cons(sym, val)?
+            }
+        };
+        result = env.cons(event_val, result)?;
     }
 
-    Ok(lines_list)
+    Ok(result)
 }
 
-/// Get the full terminal content including scrollback history with styling information
-/// Returns a list of lines, where each line is a list of styled segments:
-/// ((text fg-color bg-color bold italic underline) ...)
-/// Lines are returned from oldest (top of scrollback) to newest (bottom of screen)
-#[defun(name = "alacritty--module-get-full-styled-content")]
-fn get_full_styled_content<'e>(env: &'e Env, term: &AlacrittyTerm) -> Result<Value<'e>> {
-    let term_lock = term.term.lock();
-    let grid = term_lock.grid();
-
-    let mut lines_list = env.intern("nil")?;
-
-    // Calculate the range of lines: from topmost (negative, oldest history) to bottommost (positive, visible)
-    let history_size = grid.total_lines().saturating_sub(grid.screen_lines());
-    let start_line = -(history_size as i32);
-    let end_line = grid.screen_lines() as i32;
-
-    // Process lines in reverse order so we can build the list with cons
-    // Go from end_line-1 down to start_line
-    for line_idx in (start_line..end_line).rev() {
-        let row = &grid[Line(line_idx)];
-        let segments_list = build_line_segments(env, row, grid.columns())?;
-        lines_list = env.cons(segments_list, lines_list)?;
-    }
-
-    Ok(lines_list)
+/// Check if terminal is dirty (needs redraw)
+#[defun(name = "alacritty--module-is-dirty")]
+fn is_dirty(term: &AlacrittyTerm) -> Result<bool> {
+    Ok(term.is_dirty())
 }
 
-/// Get the number of scrollback (history) lines
+/// Clear dirty flag
+#[defun(name = "alacritty--module-clear-dirty")]
+fn clear_dirty(term: &AlacrittyTerm) -> Result<()> {
+    term.clear_dirty();
+    Ok(())
+}
+
+/// Get cursor row
+#[defun(name = "alacritty--module-cursor-row")]
+fn cursor_row(term: &AlacrittyTerm) -> Result<i64> {
+    Ok(term.cursor_position().0 as i64)
+}
+
+/// Get cursor column
+#[defun(name = "alacritty--module-cursor-col")]
+fn cursor_col(term: &AlacrittyTerm) -> Result<i64> {
+    Ok(term.cursor_position().1 as i64)
+}
+
+/// Get terminal title
+#[defun(name = "alacritty--module-get-title")]
+fn get_title(term: &AlacrittyTerm) -> Result<String> {
+    Ok(term.get_title())
+}
+
+/// Check if in alternate screen mode
+#[defun(name = "alacritty--module-alt-screen-mode")]
+fn alt_screen_mode(term: &AlacrittyTerm) -> Result<bool> {
+    Ok(term.get_mode().contains(TermMode::ALT_SCREEN))
+}
+
+/// Check if in application cursor mode
+#[defun(name = "alacritty--module-app-cursor-mode")]
+fn app_cursor_mode(term: &AlacrittyTerm) -> Result<bool> {
+    Ok(term.get_mode().contains(TermMode::APP_CURSOR))
+}
+
+/// Check if bracketed paste mode is enabled
+#[defun(name = "alacritty--module-bracketed-paste-mode")]
+fn bracketed_paste_mode(term: &AlacrittyTerm) -> Result<bool> {
+    Ok(term.get_mode().contains(TermMode::BRACKETED_PASTE))
+}
+
+/// Get history (scrollback) size
 #[defun(name = "alacritty--module-history-size")]
 fn history_size(term: &AlacrittyTerm) -> Result<i64> {
     let term_lock = term.term.lock();
@@ -521,200 +372,14 @@ fn history_size(term: &AlacrittyTerm) -> Result<i64> {
     Ok(history as i64)
 }
 
-/// Helper to build segments for a single line
-fn build_line_segments<'e>(
-    env: &'e Env,
-    row: &alacritty_terminal::grid::Row<alacritty_terminal::term::cell::Cell>,
-    columns: usize,
-) -> Result<Value<'e>> {
-    let mut segments_list = env.intern("nil")?;
-
-    // Group consecutive cells with the same attributes
-    let mut current_text = String::new();
-    let mut current_fg: Option<(u8, u8, u8)> = None;
-    let mut current_bg: Option<(u8, u8, u8)> = None;
-    let mut current_flags: Option<CellFlags> = None;
-
-    for col_idx in (0..columns).rev() {
-        let cell = &row[Column(col_idx)];
-
-        // Skip wide character spacer cells - they're placeholders for the
-        // second half of wide characters and shouldn't be rendered
-        if cell.flags.contains(CellFlags::WIDE_CHAR_SPACER) {
-            continue;
-        }
-
-        let c = if cell.c == '\0' { ' ' } else { cell.c };
-
-        let fg = color_to_rgb(&cell.fg);
-        let bg = color_to_rgb(&cell.bg);
-        let flags = cell.flags;
-
-        // Check if attributes changed
-        let attrs_match =
-            current_fg == Some(fg) && current_bg == Some(bg) && current_flags == Some(flags);
-
-        if !attrs_match && !current_text.is_empty() {
-            // Emit current segment (text is reversed, so reverse it back)
-            let text: String = current_text.chars().rev().collect();
-            let segment = make_segment(
-                env,
-                &text,
-                current_fg.unwrap(),
-                current_bg.unwrap(),
-                current_flags.unwrap(),
-            )?;
-            segments_list = env.cons(segment, segments_list)?;
-            current_text.clear();
-        }
-
-        current_text.push(c);
-        current_fg = Some(fg);
-        current_bg = Some(bg);
-        current_flags = Some(flags);
-    }
-
-    // Emit final segment for the line
-    if !current_text.is_empty() {
-        let text: String = current_text.chars().rev().collect();
-        let segment = make_segment(
-            env,
-            &text,
-            current_fg.unwrap(),
-            current_bg.unwrap(),
-            current_flags.unwrap(),
-        )?;
-        segments_list = env.cons(segment, segments_list)?;
-    }
-
-    Ok(segments_list)
-}
-
-/// Helper to create a segment: (text fg-color bg-color bold italic underline inverse)
-fn make_segment<'e>(
-    env: &'e Env,
-    text: &str,
-    fg: (u8, u8, u8),
-    bg: (u8, u8, u8),
-    flags: CellFlags,
-) -> Result<Value<'e>> {
-    let text_val = text.into_lisp(env)?;
-    let fg_val = format!("#{:02x}{:02x}{:02x}", fg.0, fg.1, fg.2).into_lisp(env)?;
-    let bg_val = format!("#{:02x}{:02x}{:02x}", bg.0, bg.1, bg.2).into_lisp(env)?;
-
-    let bold = if flags.contains(CellFlags::BOLD) {
-        env.intern("t")?
-    } else {
-        env.intern("nil")?
-    };
-    let italic = if flags.contains(CellFlags::ITALIC) {
-        env.intern("t")?
-    } else {
-        env.intern("nil")?
-    };
-    let underline = if flags.contains(CellFlags::UNDERLINE) {
-        env.intern("t")?
-    } else {
-        env.intern("nil")?
-    };
-    let inverse = if flags.contains(CellFlags::INVERSE) {
-        env.intern("t")?
-    } else {
-        env.intern("nil")?
-    };
-
-    // Build list: (text fg bg bold italic underline inverse)
-    let nil = env.intern("nil")?;
-    let result = env.cons(inverse, nil)?;
-    let result = env.cons(underline, result)?;
-    let result = env.cons(italic, result)?;
-    let result = env.cons(bold, result)?;
-    let result = env.cons(bg_val, result)?;
-    let result = env.cons(fg_val, result)?;
-    let result = env.cons(text_val, result)?;
-
-    Ok(result)
-}
-
-/// Get render data for visible screen only (no scrollback) - optimized for alt-screen apps
-/// Returns: (styled-lines cursor-row cursor-col line-wrap-flags)
-/// This is faster than get-render-data as it skips scrollback history,
-/// ideal for fullscreen apps like htop, vim, etc.
-#[defun(name = "alacritty--module-get-screen-render-data")]
-fn get_screen_render_data<'e>(env: &'e Env, term: &AlacrittyTerm) -> Result<Value<'e>> {
+/// Redraw the terminal buffer directly from Rust
+/// Returns: (history-size cursor-row cursor-col is-alt-screen wrap-flags)
+#[defun(name = "alacritty--module-redraw")]
+fn redraw<'e>(env: &'e Env, term: &AlacrittyTerm) -> Result<Value<'e>> {
     let term_lock = term.term.lock();
+    let alt_screen = term_lock.mode().contains(TermMode::ALT_SCREEN);
     let grid = term_lock.grid();
 
-    // Get cursor position
-    let cursor = grid.cursor.point;
-    let cursor_row = if cursor.line.0 < 0 {
-        0
-    } else {
-        cursor.line.0 as i64
-    };
-    let cursor_col = cursor.column.0 as i64;
-
-    let screen_lines = grid.screen_lines() as i32;
-
-    // Build styled lines for visible screen only (lines 0 to screen_lines-1)
-    let mut lines_list = env.intern("nil")?;
-    for line_idx in (0..screen_lines).rev() {
-        let row = &grid[Line(line_idx)];
-        let segments_list = build_line_segments(env, row, grid.columns())?;
-        lines_list = env.cons(segments_list, lines_list)?;
-    }
-
-    // Build line-wrap flags list for visible screen only
-    let mut wrap_flags = env.intern("nil")?;
-    for line_idx in (0..screen_lines).rev() {
-        let row = &grid[Line(line_idx)];
-        let last_col = grid.columns().saturating_sub(1);
-        if row[Column(last_col)].flags.contains(CellFlags::WRAPLINE) {
-            let idx_val = (line_idx as i64).into_lisp(env)?;
-            wrap_flags = env.cons(idx_val, wrap_flags)?;
-        }
-    }
-
-    // Build result: (styled-lines cursor-row cursor-col line-wrap-flags)
-    let nil = env.intern("nil")?;
-    let result = env.cons(wrap_flags, nil)?;
-    let cursor_col_val = cursor_col.into_lisp(env)?;
-    let result = env.cons(cursor_col_val, result)?;
-    let cursor_row_val = cursor_row.into_lisp(env)?;
-    let result = env.cons(cursor_row_val, result)?;
-    let result = env.cons(lines_list, result)?;
-
-    Ok(result)
-}
-
-/// Get only the damaged (changed) lines for incremental rendering
-/// Returns: (damage-type cursor-row cursor-col damaged-lines)
-/// where damage-type is 'full or 'partial
-/// and damaged-lines is a list of (line-number . styled-segments) for partial damage
-/// For full damage, damaged-lines contains all screen lines
-/// This uses alacritty_terminal's built-in damage tracking for efficiency.
-#[defun(name = "alacritty--module-get-damaged-lines")]
-fn get_damaged_lines<'e>(env: &'e Env, term: &AlacrittyTerm) -> Result<Value<'e>> {
-    let mut term_lock = term.term.lock();
-
-    // Get damage information and collect damaged line numbers
-    // We need to collect first because the iterator borrows term_lock mutably
-    let damage = term_lock.damage();
-    let (is_full, damaged_line_nums): (bool, Vec<usize>) = match damage {
-        TermDamage::Full => (true, Vec::new()),
-        TermDamage::Partial(iter) => {
-            let mut nums: Vec<_> = iter.map(|d| d.line).collect();
-            nums.sort();
-            nums.dedup();
-            (false, nums)
-        }
-    };
-
-    // Reset damage state after reading
-    term_lock.reset_damage();
-
-    // Now get cursor position and grid info
-    let grid = term_lock.grid();
     let cursor = grid.cursor.point;
     let cursor_row = if cursor.line.0 < 0 {
         0
@@ -724,547 +389,249 @@ fn get_damaged_lines<'e>(env: &'e Env, term: &AlacrittyTerm) -> Result<Value<'e>
     let cursor_col = cursor.column.0 as i64;
     let num_cols = grid.columns();
     let screen_lines = grid.screen_lines() as i32;
-
-    // Build the result based on damage type
-    let (damage_type, damaged_lines) = if is_full {
-        // Full damage - return all visible lines
-        let mut lines_list = env.intern("nil")?;
-        for line_idx in (0..screen_lines).rev() {
-            let row = &grid[Line(line_idx)];
-            let segments_list = build_line_segments(env, row, num_cols)?;
-            let line_num = (line_idx as i64).into_lisp(env)?;
-            let line_entry = env.cons(line_num, segments_list)?;
-            lines_list = env.cons(line_entry, lines_list)?;
-        }
-        (env.intern("full")?, lines_list)
-    } else {
-        // Partial damage - only return damaged lines
-        let mut lines_list = env.intern("nil")?;
-        for line_idx in damaged_line_nums.into_iter().rev() {
-            // Bounds check
-            if line_idx < screen_lines as usize {
-                let row = &grid[Line(line_idx as i32)];
-                let segments_list = build_line_segments(env, row, num_cols)?;
-                let line_num = (line_idx as i64).into_lisp(env)?;
-                let line_entry = env.cons(line_num, segments_list)?;
-                lines_list = env.cons(line_entry, lines_list)?;
-            }
-        }
-        (env.intern("partial")?, lines_list)
-    };
-
-    // Build result: (damage-type cursor-row cursor-col damaged-lines)
-    let nil = env.intern("nil")?;
-    let result = env.cons(damaged_lines, nil)?;
-    let cursor_col_val = cursor_col.into_lisp(env)?;
-    let result = env.cons(cursor_col_val, result)?;
-    let cursor_row_val = cursor_row.into_lisp(env)?;
-    let result = env.cons(cursor_row_val, result)?;
-    let result = env.cons(damage_type, result)?;
-
-    Ok(result)
-}
-
-/// Check if a line wraps (has a fake newline at the end)
-/// Returns true if the line continues on the next line (i.e., should NOT have a real newline)
-/// Line index is 0-based from the start of the buffer (including scrollback)
-/// So line 0 is the first line of scrollback, and scrollback_size + screen_line is the visible area
-#[defun(name = "alacritty--module-line-wraps")]
-fn line_wraps(term: &AlacrittyTerm, line: i64) -> Result<bool> {
-    let term_lock = term.term.lock();
-    let grid = term_lock.grid();
-
-    // Convert buffer-relative line (0-based from top of scrollback) to grid Line
-    // Grid uses negative indices for scrollback: Line(-history_size) to Line(-1)
-    // And positive for visible: Line(0) to Line(screen_lines-1)
-    let history_size = grid.total_lines().saturating_sub(grid.screen_lines());
-    let grid_line = (line as i32) - (history_size as i32);
-
-    // Check bounds
-    let topmost = -(history_size as i32);
-    let bottommost = grid.screen_lines() as i32 - 1;
-    if grid_line < topmost || grid_line > bottommost {
-        return Ok(false);
-    }
-
-    let row = &grid[Line(grid_line)];
-    // Check if the last column has the WRAPLINE flag
-    let last_col = grid.columns().saturating_sub(1);
-    Ok(row[Column(last_col)].flags.contains(CellFlags::WRAPLINE))
-}
-
-/// Get terminal status and process events in one call to reduce FFI overhead
-/// Returns: (is-dirty is-exited events)
-/// where events is a list of events that need Elisp handling (title, bell, clipboard)
-/// This combines poll-events, is-dirty, and is-exited into a single call.
-#[defun(name = "alacritty--module-get-status")]
-fn get_status<'e>(env: &'e Env, term: &AlacrittyTerm) -> Result<Value<'e>> {
-    let (is_dirty, is_exited, events) = term.get_status_and_process_events();
-    
-    let nil = env.intern("nil")?;
-    let t = env.intern("t")?;
-    
-    // Build events list
-    let mut events_list = nil;
-    for event in events.into_iter().rev() {
-        let event_val = match event {
-            TermEvent::Title(title) => {
-                let title_sym = env.intern("title")?;
-                let title_val = title.into_lisp(env)?;
-                env.cons(title_sym, title_val)?
-            }
-            TermEvent::Bell => {
-                let bell_sym = env.intern("bell")?;
-                env.cons(bell_sym, t)?
-            }
-            TermEvent::ClipboardStore(data) => {
-                let clip_sym = env.intern("clipboard-store")?;
-                let data_val = data.into_lisp(env)?;
-                env.cons(clip_sym, data_val)?
-            }
-            TermEvent::ClipboardLoad => {
-                let clip_sym = env.intern("clipboard-load")?;
-                env.cons(clip_sym, t)?
-            }
-            TermEvent::CursorBlinkingChange => {
-                let blink_sym = env.intern("cursor-blink-change")?;
-                let blink_state = term.term.lock().cursor_style().blinking;
-                if blink_state {
-                    env.cons(blink_sym, t)?
-                } else {
-                    env.cons(blink_sym, nil)?
-                }
-            }
-            _ => continue,
-        };
-        events_list = env.cons(event_val, events_list)?;
-    }
-    
-    let is_exited_val = if is_exited { t } else { nil };
-    let is_dirty_val = if is_dirty { t } else { nil };
-    
-    let result = env.cons(events_list, nil)?;
-    let result = env.cons(is_exited_val, result)?;
-    let result = env.cons(is_dirty_val, result)?;
-    
-    Ok(result)
-}
-
-/// Get the cursor row (0-indexed)
-#[defun(name = "alacritty--module-cursor-row")]
-fn cursor_row(term: &AlacrittyTerm) -> Result<i64> {
-    Ok(term.cursor_position().0 as i64)
-}
-
-/// Get the cursor column (0-indexed)
-#[defun(name = "alacritty--module-cursor-col")]
-fn cursor_col(term: &AlacrittyTerm) -> Result<i64> {
-    Ok(term.cursor_position().1 as i64)
-}
-
-/// Check if the terminal process has exited
-#[defun(name = "alacritty--module-is-exited")]
-fn is_exited(term: &AlacrittyTerm) -> Result<bool> {
-    Ok(term.is_exited())
-}
-
-/// Check if the terminal content has changed and needs redrawing
-#[defun(name = "alacritty--module-is-dirty")]
-fn is_dirty(term: &AlacrittyTerm) -> Result<bool> {
-    Ok(term.is_dirty())
-}
-
-/// Clear the dirty flag after redrawing
-#[defun(name = "alacritty--module-clear-dirty")]
-fn clear_dirty(term: &AlacrittyTerm) -> Result<()> {
-    term.clear_dirty();
-    Ok(())
-}
-
-/// Get the terminal title (set by the shell/programs via escape sequences)
-#[defun(name = "alacritty--module-get-title")]
-fn get_title(term: &AlacrittyTerm) -> Result<String> {
-    Ok(term.get_title())
-}
-
-/// Get the number of columns
-#[defun(name = "alacritty--module-columns")]
-fn columns(term: &AlacrittyTerm) -> Result<i64> {
-    Ok(term.size.lock().cols as i64)
-}
-
-/// Get the number of lines
-#[defun(name = "alacritty--module-lines")]
-fn lines(term: &AlacrittyTerm) -> Result<i64> {
-    Ok(term.size.lock().lines as i64)
-}
-
-/// Process pending events and return event info
-/// Returns a list of events: ((type . data) ...)
-#[defun(name = "alacritty--module-poll-events")]
-fn poll_events<'e>(env: &'e Env, term: &AlacrittyTerm) -> Result<Value<'e>> {
-    let events = term.process_events();
-    let mut result = env.intern("nil")?;
-
-    for event in events.into_iter().rev() {
-        let event_val = match event {
-            TermEvent::Title(title) => {
-                let title_sym = env.intern("title")?;
-                let title_val = title.into_lisp(env)?;
-                env.cons(title_sym, title_val)?
-            }
-            TermEvent::Bell => {
-                let bell_sym = env.intern("bell")?;
-                env.cons(bell_sym, env.intern("t")?)?
-            }
-            TermEvent::Exit => {
-                let exit_sym = env.intern("exit")?;
-                env.cons(exit_sym, env.intern("t")?)?
-            }
-            TermEvent::ClipboardStore(data) => {
-                let clip_sym = env.intern("clipboard-store")?;
-                let data_val = data.into_lisp(env)?;
-                env.cons(clip_sym, data_val)?
-            }
-            TermEvent::ClipboardLoad => {
-                let clip_sym = env.intern("clipboard-load")?;
-                env.cons(clip_sym, env.intern("t")?)?
-            }
-            TermEvent::Wakeup => {
-                let wakeup_sym = env.intern("wakeup")?;
-                env.cons(wakeup_sym, env.intern("t")?)?
-            }
-            TermEvent::CursorBlinkingChange => {
-                let blink_sym = env.intern("cursor-blink-change")?;
-                // Get current blink state from terminal
-                let blink_state = term.term.lock().cursor_style().blinking;
-                if blink_state {
-                    env.cons(blink_sym, env.intern("t")?)?
-                } else {
-                    env.cons(blink_sym, env.intern("nil")?)?
-                }
-            }
-            _ => continue,
-        };
-        result = env.cons(event_val, result)?;
-    }
-
-    Ok(result)
-}
-
-/// Check if the terminal is in application cursor mode
-#[defun(name = "alacritty--module-app-cursor-mode")]
-fn app_cursor_mode(term: &AlacrittyTerm) -> Result<bool> {
-    Ok(term.get_mode().contains(TermMode::APP_CURSOR))
-}
-
-/// Check if the terminal is in application keypad mode
-#[defun(name = "alacritty--module-app-keypad-mode")]
-fn app_keypad_mode(term: &AlacrittyTerm) -> Result<bool> {
-    Ok(term.get_mode().contains(TermMode::APP_KEYPAD))
-}
-
-/// Check if the terminal is in alternate screen mode
-#[defun(name = "alacritty--module-alt-screen-mode")]
-fn alt_screen_mode(term: &AlacrittyTerm) -> Result<bool> {
-    Ok(term.get_mode().contains(TermMode::ALT_SCREEN))
-}
-
-/// Check if bracketed paste mode is enabled
-#[defun(name = "alacritty--module-bracketed-paste-mode")]
-fn bracketed_paste_mode(term: &AlacrittyTerm) -> Result<bool> {
-    Ok(term.get_mode().contains(TermMode::BRACKETED_PASTE))
-}
-
-/// Check if the cursor should be blinking
-#[defun(name = "alacritty--module-cursor-blink")]
-fn cursor_blink(term: &AlacrittyTerm) -> Result<bool> {
-    let term_lock = term.term.lock();
-    Ok(term_lock.cursor_style().blinking)
-}
-
-/// Get a single line of terminal content (0-indexed)
-#[defun(name = "alacritty--module-get-line")]
-fn get_line(term: &AlacrittyTerm, line: i64) -> Result<String> {
-    let term_lock = term.term.lock();
-    let grid = term_lock.grid();
-    let line_idx = line as i32;
-
-    if line_idx < 0 || line_idx >= grid.screen_lines() as i32 {
-        return Ok(String::new());
-    }
-
-    let row = &grid[Line(line_idx)];
-    let mut result = String::new();
-    for col in 0..grid.columns() {
-        let cell = &row[Column(col)];
-        // Skip wide character spacer cells
-        if cell.flags.contains(CellFlags::WIDE_CHAR_SPACER) {
-            continue;
-        }
-        let c = cell.c;
-        if c == '\0' {
-            result.push(' ');
-        } else {
-            result.push(c);
-        }
-    }
-
-    Ok(result.trim_end().to_string())
-}
-
-/// Get cell at position with attributes
-/// Returns (char fg-color bg-color flags) or nil if out of bounds
-#[defun(name = "alacritty--module-get-cell")]
-fn get_cell<'e>(env: &'e Env, term: &AlacrittyTerm, row: i64, col: i64) -> Result<Value<'e>> {
-    let term_lock = term.term.lock();
-    let grid = term_lock.grid();
-
-    if row < 0 || row >= grid.screen_lines() as i64 || col < 0 || col >= grid.columns() as i64 {
-        return env.intern("nil");
-    }
-
-    let cell = &grid[Line(row as i32)][Column(col as usize)];
-
-    // Create a list with cell information
-    let char_str = cell.c.to_string().into_lisp(env)?;
-
-    let (fg_r, fg_g, fg_b) = color_to_rgb(&cell.fg);
-    let (bg_r, bg_g, bg_b) = color_to_rgb(&cell.bg);
-
-    let fg_color = format!("#{:02x}{:02x}{:02x}", fg_r, fg_g, fg_b).into_lisp(env)?;
-    let bg_color = format!("#{:02x}{:02x}{:02x}", bg_r, bg_g, bg_b).into_lisp(env)?;
-
-    // Flags as a list of symbols
-    let mut flags = env.intern("nil")?;
-    if cell.flags.contains(CellFlags::BOLD) {
-        let bold = env.intern("bold")?;
-        flags = env.cons(bold, flags)?;
-    }
-    if cell.flags.contains(CellFlags::ITALIC) {
-        let italic = env.intern("italic")?;
-        flags = env.cons(italic, flags)?;
-    }
-    if cell.flags.contains(CellFlags::UNDERLINE) {
-        let underline = env.intern("underline")?;
-        flags = env.cons(underline, flags)?;
-    }
-    if cell.flags.contains(CellFlags::INVERSE) {
-        let inverse = env.intern("inverse")?;
-        flags = env.cons(inverse, flags)?;
-    }
-    if cell.flags.contains(CellFlags::STRIKEOUT) {
-        let strikeout = env.intern("strikeout")?;
-        flags = env.cons(strikeout, flags)?;
-    }
-    if cell.flags.contains(CellFlags::HIDDEN) {
-        let hidden = env.intern("hidden")?;
-        flags = env.cons(hidden, flags)?;
-    }
-
-    // Build result list
-    let nil = env.intern("nil")?;
-    let result = env.cons(flags, nil)?;
-    let result = env.cons(bg_color, result)?;
-    let result = env.cons(fg_color, result)?;
-    let result = env.cons(char_str, result)?;
-
-    Ok(result)
-}
-
-/// Send a special key to the terminal
-/// Key can be: up, down, left, right, home, end, page-up, page-down,
-/// tab, backspace, delete, insert, enter, escape, f1-f12
-#[defun(name = "alacritty--module-send-key")]
-fn send_key(term: &AlacrittyTerm, key: String, modifiers: Option<String>) -> Result<()> {
-    let mode = term.get_mode();
-    let app_cursor = mode.contains(TermMode::APP_CURSOR);
-    let _app_keypad = mode.contains(TermMode::APP_KEYPAD);
-
-    let mods = modifiers.unwrap_or_default();
-    let ctrl = mods.contains("C");
-    let alt = mods.contains("M");
-    let shift = mods.contains("S");
-
-    let seq: &[u8] = match key.as_str() {
-        "up" => {
-            if app_cursor {
-                b"\x1bOA"
-            } else {
-                b"\x1b[A"
-            }
-        }
-        "down" => {
-            if app_cursor {
-                b"\x1bOB"
-            } else {
-                b"\x1b[B"
-            }
-        }
-        "right" => {
-            if app_cursor {
-                b"\x1bOC"
-            } else {
-                b"\x1b[C"
-            }
-        }
-        "left" => {
-            if app_cursor {
-                b"\x1bOD"
-            } else {
-                b"\x1b[D"
-            }
-        }
-        "home" => b"\x1b[H",
-        "end" => b"\x1b[F",
-        "page-up" => b"\x1b[5~",
-        "page-down" => b"\x1b[6~",
-        "tab" => {
-            if shift {
-                b"\x1b[Z"
-            } else {
-                b"\t"
-            }
-        }
-        "backspace" => {
-            if ctrl {
-                b"\x08"
-            } else if alt {
-                b"\x1b\x7f"
-            } else {
-                b"\x7f"
-            }
-        }
-        "delete" => b"\x1b[3~",
-        "insert" => b"\x1b[2~",
-        "enter" | "return" => {
-            if alt {
-                b"\x1b\r"
-            } else {
-                b"\r"
-            }
-        }
-        "escape" => b"\x1b",
-        "f1" => b"\x1bOP",
-        "f2" => b"\x1bOQ",
-        "f3" => b"\x1bOR",
-        "f4" => b"\x1bOS",
-        "f5" => b"\x1b[15~",
-        "f6" => b"\x1b[17~",
-        "f7" => b"\x1b[18~",
-        "f8" => b"\x1b[19~",
-        "f9" => b"\x1b[20~",
-        "f10" => b"\x1b[21~",
-        "f11" => b"\x1b[23~",
-        "f12" => b"\x1b[24~",
-        _ => return Ok(()),
-    };
-
-    term.write(seq);
-    Ok(())
-}
-
-/// Send a character with modifiers
-/// Handles ctrl+char, meta+char combinations
-#[defun(name = "alacritty--module-send-char")]
-fn send_char(term: &AlacrittyTerm, c: i64, modifiers: Option<String>) -> Result<()> {
-    let ch = char::from_u32(c as u32).unwrap_or('\0');
-    let mods = modifiers.unwrap_or_default();
-    let ctrl = mods.contains("C");
-    let alt = mods.contains("M");
-
-    let mut data = Vec::new();
-
-    if alt {
-        data.push(0x1b);
-    }
-
-    if ctrl && ch.is_ascii_alphabetic() {
-        // Ctrl+A = 0x01, Ctrl+Z = 0x1A
-        let ctrl_char = (ch.to_ascii_lowercase() as u8) - b'a' + 1;
-        data.push(ctrl_char);
-    } else {
-        let mut buf = [0u8; 4];
-        let s = ch.encode_utf8(&mut buf);
-        data.extend_from_slice(s.as_bytes());
-    }
-
-    term.write(&data);
-    Ok(())
-}
-
-/// Send a paste with optional bracketed paste mode support
-#[defun(name = "alacritty--module-paste")]
-fn paste(term: &AlacrittyTerm, text: String) -> Result<()> {
-    let mode = term.get_mode();
-    let bracketed = mode.contains(TermMode::BRACKETED_PASTE);
-
-    if bracketed {
-        term.write(b"\x1b[200~");
-    }
-    term.write(text.as_bytes());
-    if bracketed {
-        term.write(b"\x1b[201~");
-    }
-    Ok(())
-}
-
-/// Get all render data in a single FFI call for efficiency
-/// Returns: (styled-lines history-size cursor-row cursor-col line-wrap-flags)
-/// where line-wrap-flags is a list of line indices (0-based) that have fake newlines
-/// This combines get-full-styled-content, history-size, cursor-row, cursor-col,
-/// and line-wraps into a single call to reduce FFI overhead.
-#[defun(name = "alacritty--module-get-render-data")]
-fn get_render_data<'e>(env: &'e Env, term: &AlacrittyTerm) -> Result<Value<'e>> {
-    let term_lock = term.term.lock();
-    let grid = term_lock.grid();
-
-    // Get cursor position
-    let cursor = grid.cursor.point;
-    let cursor_row = if cursor.line.0 < 0 {
-        0
-    } else {
-        cursor.line.0 as i64
-    };
-    let cursor_col = cursor.column.0 as i64;
-
-    // Calculate history size
     let history_size = grid.total_lines().saturating_sub(grid.screen_lines()) as i64;
-    let start_line = -(history_size as i32);
-    let end_line = grid.screen_lines() as i32;
 
-    // Build styled lines (same as get_full_styled_content)
-    let mut lines_list = env.intern("nil")?;
-    for line_idx in (start_line..end_line).rev() {
-        let row = &grid[Line(line_idx)];
-        let segments_list = build_line_segments(env, row, grid.columns())?;
-        lines_list = env.cons(segments_list, lines_list)?;
+    // Cache symbols
+    let syms = RenderSymbols::new(env)?;
+
+    // Always do full redraw for simplicity (damage tracking can be added later)
+    env.call(syms.erase_buffer, [])?;
+
+    if alt_screen {
+        // Alt screen: only visible lines
+        for line_idx in 0..screen_lines {
+            let row = &grid[Line(line_idx)];
+            // On cursor line, preserve whitespace up to cursor position
+            let min_cols = if line_idx == cursor.line.0 {
+                Some(cursor.column.0 + 1)
+            } else {
+                None
+            };
+            insert_line_content(env, row, num_cols, min_cols, &syms)?;
+            if line_idx < screen_lines - 1 {
+                env.call(syms.insert_fn, [syms.newline])?;
+            }
+        }
+    } else {
+        // Normal mode: include scrollback
+        let start_line = -(history_size as i32);
+        for line_idx in start_line..screen_lines {
+            let row = &grid[Line(line_idx)];
+            // On cursor line, preserve whitespace up to cursor position
+            let min_cols = if line_idx == cursor.line.0 {
+                Some(cursor.column.0 + 1)
+            } else {
+                None
+            };
+            insert_line_content(env, row, num_cols, min_cols, &syms)?;
+            env.call(syms.insert_fn, [syms.newline])?;
+        }
     }
 
-    // Build line-wrap flags list (lines that have fake newlines)
-    // Return as list of 0-based line indices from start of buffer
-    let mut wrap_flags = env.intern("nil")?;
-    let total_lines = (end_line - start_line) as usize;
-    for buffer_line_idx in (0..total_lines).rev() {
-        let grid_line = (buffer_line_idx as i32) + start_line;
-        let row = &grid[Line(grid_line)];
-        let last_col = grid.columns().saturating_sub(1);
+    // Build wrap flags list
+    let mut wrap_flags = syms.nil;
+    for line_idx in (0..screen_lines).rev() {
+        let row = &grid[Line(line_idx)];
+        let last_col = num_cols.saturating_sub(1);
         if row[Column(last_col)].flags.contains(CellFlags::WRAPLINE) {
-            let idx_val = (buffer_line_idx as i64).into_lisp(env)?;
+            let idx_val = (line_idx as i64).into_lisp(env)?;
             wrap_flags = env.cons(idx_val, wrap_flags)?;
         }
     }
 
-    // Build result: (styled-lines history-size cursor-row cursor-col line-wrap-flags)
-    let nil = env.intern("nil")?;
-    let result = env.cons(wrap_flags, nil)?;
-    let cursor_col_val = cursor_col.into_lisp(env)?;
-    let result = env.cons(cursor_col_val, result)?;
-    let cursor_row_val = cursor_row.into_lisp(env)?;
-    let result = env.cons(cursor_row_val, result)?;
-    let history_size_val = history_size.into_lisp(env)?;
-    let result = env.cons(history_size_val, result)?;
-    let result = env.cons(lines_list, result)?;
+    // Return: (history-size cursor-row cursor-col is-alt-screen wrap-flags)
+    let result = env.cons(wrap_flags, syms.nil)?;
+    let alt_val = if alt_screen { syms.t } else { syms.nil };
+    let result = env.cons(alt_val, result)?;
+    let result = env.cons(cursor_col.into_lisp(env)?, result)?;
+    let result = env.cons(cursor_row.into_lisp(env)?, result)?;
+    let result = env.cons(history_size.into_lisp(env)?, result)?;
 
     Ok(result)
+}
+
+/// Cached Emacs symbols for rendering
+struct RenderSymbols<'e> {
+    erase_buffer: Value<'e>,
+    insert_fn: Value<'e>,
+    propertize: Value<'e>,
+    nil: Value<'e>,
+    t: Value<'e>,
+    newline: Value<'e>,
+    face_sym: Value<'e>,
+    list_fn: Value<'e>,
+    foreground_sym: Value<'e>,
+    background_sym: Value<'e>,
+    weight_sym: Value<'e>,
+    bold_sym: Value<'e>,
+    slant_sym: Value<'e>,
+    italic_sym: Value<'e>,
+    underline_sym: Value<'e>,
+    inverse_video_sym: Value<'e>,
+}
+
+impl<'e> RenderSymbols<'e> {
+    fn new(env: &'e Env) -> Result<Self> {
+        Ok(Self {
+            erase_buffer: env.intern("erase-buffer")?,
+            insert_fn: env.intern("insert")?,
+            propertize: env.intern("propertize")?,
+            nil: env.intern("nil")?,
+            t: env.intern("t")?,
+            newline: "\n".into_lisp(env)?,
+            face_sym: env.intern("face")?,
+            list_fn: env.intern("list")?,
+            foreground_sym: env.intern(":foreground")?,
+            background_sym: env.intern(":background")?,
+            weight_sym: env.intern(":weight")?,
+            bold_sym: env.intern("bold")?,
+            slant_sym: env.intern(":slant")?,
+            italic_sym: env.intern("italic")?,
+            underline_sym: env.intern(":underline")?,
+            inverse_video_sym: env.intern(":inverse-video")?,
+        })
+    }
+}
+
+/// Insert a line's content with text properties
+/// If min_columns is Some(n), preserve at least n columns (don't trim beyond that point)
+fn insert_line_content<'e>(
+    env: &'e Env,
+    row: &alacritty_terminal::grid::Row<alacritty_terminal::term::cell::Cell>,
+    columns: usize,
+    min_columns: Option<usize>,
+    syms: &RenderSymbols<'e>,
+) -> Result<()> {
+    let mut current_text = String::new();
+    let mut current_fg: Option<(u8, u8, u8)> = None;
+    let mut current_bg: Option<(u8, u8, u8)> = None;
+    let mut current_flags: Option<CellFlags> = None;
+
+    for col_idx in 0..columns {
+        let cell = &row[Column(col_idx)];
+
+        if cell.flags.contains(CellFlags::WIDE_CHAR_SPACER) {
+            continue;
+        }
+
+        let c = if cell.c == '\0' { ' ' } else { cell.c };
+        let fg = color_to_rgb(&cell.fg);
+        let bg = color_to_rgb(&cell.bg);
+        let flags = cell.flags;
+
+        let attrs_match =
+            current_fg == Some(fg) && current_bg == Some(bg) && current_flags == Some(flags);
+
+        if !attrs_match && !current_text.is_empty() {
+            insert_styled_text(
+                env,
+                &current_text,
+                current_fg.unwrap(),
+                current_bg.unwrap(),
+                current_flags.unwrap(),
+                syms,
+            )?;
+            current_text.clear();
+        }
+
+        current_text.push(c);
+        current_fg = Some(fg);
+        current_bg = Some(bg);
+        current_flags = Some(flags);
+    }
+
+    // Insert final segment
+    // Trim trailing whitespace, but preserve up to min_columns if specified
+    if !current_text.is_empty() {
+        let text_to_insert = if let Some(min_cols) = min_columns {
+            // Find how many chars we need to keep to satisfy min_columns
+            // We need to be careful: the text may have wide chars that take 2 columns
+            let trimmed = current_text.trim_end();
+            if trimmed.len() >= min_cols {
+                trimmed
+            } else {
+                // Need to preserve some trailing spaces
+                // Calculate visual column count
+                let mut visual_col = 0;
+                let mut byte_end = 0;
+                for (idx, c) in current_text.char_indices() {
+                    if visual_col >= min_cols {
+                        break;
+                    }
+                    visual_col += unicode_width::UnicodeWidthChar::width(c).unwrap_or(1);
+                    byte_end = idx + c.len_utf8();
+                }
+                &current_text[..byte_end]
+            }
+        } else {
+            current_text.trim_end()
+        };
+
+        if !text_to_insert.is_empty() {
+            insert_styled_text(
+                env,
+                text_to_insert,
+                current_fg.unwrap(),
+                current_bg.unwrap(),
+                current_flags.unwrap(),
+                syms,
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Insert styled text using propertize
+fn insert_styled_text<'e>(
+    env: &'e Env,
+    text: &str,
+    fg: (u8, u8, u8),
+    bg: (u8, u8, u8),
+    flags: CellFlags,
+    syms: &RenderSymbols<'e>,
+) -> Result<()> {
+    let text_val = text.into_lisp(env)?;
+
+    let mut props = Vec::new();
+
+    let is_default_fg = fg == (229, 229, 229);
+    let is_default_bg = bg == (0, 0, 0);
+
+    if !is_default_fg {
+        let fg_val = format!("#{:02x}{:02x}{:02x}", fg.0, fg.1, fg.2).into_lisp(env)?;
+        props.push(syms.foreground_sym);
+        props.push(fg_val);
+    }
+    if !is_default_bg {
+        let bg_val = format!("#{:02x}{:02x}{:02x}", bg.0, bg.1, bg.2).into_lisp(env)?;
+        props.push(syms.background_sym);
+        props.push(bg_val);
+    }
+    if flags.contains(CellFlags::BOLD) {
+        props.push(syms.weight_sym);
+        props.push(syms.bold_sym);
+    }
+    if flags.contains(CellFlags::ITALIC) {
+        props.push(syms.slant_sym);
+        props.push(syms.italic_sym);
+    }
+    if flags.contains(CellFlags::UNDERLINE) {
+        props.push(syms.underline_sym);
+        props.push(syms.t);
+    }
+    if flags.contains(CellFlags::INVERSE) {
+        props.push(syms.inverse_video_sym);
+        props.push(syms.t);
+    }
+
+    if props.is_empty() {
+        env.call(syms.insert_fn, [text_val])?;
+    } else {
+        let face_plist = env.call(syms.list_fn, &props)?;
+        let propertized = env.call(syms.propertize, [text_val, syms.face_sym, face_plist])?;
+        env.call(syms.insert_fn, [propertized])?;
+    }
+
+    Ok(())
 }

@@ -19,6 +19,8 @@ dependencies = [
  "emacs",
  "log",
  "parking_lot",
+ "unicode-width",
+ "vte",
 ]
 
 [[package]]
