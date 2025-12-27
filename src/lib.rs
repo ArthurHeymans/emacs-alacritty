@@ -203,7 +203,18 @@ fn color_to_rgb(color: &Color) -> (u8, u8, u8) {
             NamedColor::BrightWhite => (255, 255, 255),
             NamedColor::Foreground => (229, 229, 229),
             NamedColor::Background => (0, 0, 0),
-            _ => (128, 128, 128),
+            // Cursor and dim colors - use sensible defaults
+            NamedColor::Cursor => (229, 229, 229),
+            NamedColor::DimBlack => (0, 0, 0),
+            NamedColor::DimRed => (127, 0, 0),
+            NamedColor::DimGreen => (0, 127, 0),
+            NamedColor::DimYellow => (127, 127, 0),
+            NamedColor::DimBlue => (0, 0, 127),
+            NamedColor::DimMagenta => (127, 0, 127),
+            NamedColor::DimCyan => (0, 127, 127),
+            NamedColor::DimWhite => (127, 127, 127),
+            NamedColor::BrightForeground => (255, 255, 255),
+            NamedColor::DimForeground => (127, 127, 127),
         },
         Color::Indexed(idx) => match idx {
             0 => (0, 0, 0),
@@ -256,8 +267,14 @@ fn create(cols: i64, lines: i64, scrollback: Option<i64>) -> Result<AlacrittyTer
 
 /// Process bytes from the PTY - called from Emacs process filter
 /// This is the main entry point for terminal data
+/// Note: Emacs sends process output as strings. For unibyte strings (raw bytes),
+/// each character code represents a byte value. For multibyte strings,
+/// we encode to UTF-8.
 #[defun(name = "alacritty--module-process-bytes")]
 fn process_bytes(term: &AlacrittyTerm, data: String) -> Result<()> {
+    // Emacs process filters can send either unibyte or multibyte strings.
+    // In both cases, converting to Rust String and then to bytes should work
+    // because the emacs crate handles the encoding.
     term.process_bytes(data.as_bytes());
     Ok(())
 }

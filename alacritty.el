@@ -46,6 +46,62 @@
 (defvar alacritty-module-loaded nil
   "Whether the alacritty module has been loaded.")
 
+;; Declare functions defined by the dynamic module to silence byte-compiler
+(declare-function alacritty--module-create "alacritty")
+(declare-function alacritty--module-process-bytes "alacritty")
+(declare-function alacritty--module-resize "alacritty")
+(declare-function alacritty--module-take-events "alacritty")
+(declare-function alacritty--module-is-dirty "alacritty")
+(declare-function alacritty--module-reset-damage "alacritty")
+(declare-function alacritty--module-get-damage "alacritty")
+(declare-function alacritty--module-cursor-row "alacritty")
+(declare-function alacritty--module-cursor-col "alacritty")
+(declare-function alacritty--module-get-title "alacritty")
+(declare-function alacritty--module-alt-screen-mode "alacritty")
+(declare-function alacritty--module-app-cursor-mode "alacritty")
+(declare-function alacritty--module-bracketed-paste-mode "alacritty")
+(declare-function alacritty--module-history-size "alacritty")
+(declare-function alacritty--module-redraw "alacritty")
+(declare-function alacritty--module-redraw-with-damage "alacritty")
+
+;; Customization - must be defined before functions that use them
+
+(defgroup alacritty nil
+  "Alacritty terminal emulator for Emacs."
+  :group 'terminals)
+
+(defcustom alacritty-source-dir nil
+  "Directory containing the alacritty source code (with Cargo.toml)."
+  :type '(choice (const :tag "Auto-detect" nil)
+                 (directory :tag "Source directory"))
+  :group 'alacritty)
+
+(defcustom alacritty-module-build-dir
+  (locate-user-emacs-file "alacritty")
+  "Directory where the compiled module will be stored."
+  :type 'directory
+  :group 'alacritty)
+
+(defcustom alacritty-always-compile-module nil
+  "If non-nil, automatically compile the module without prompting."
+  :type 'boolean
+  :group 'alacritty)
+
+(defcustom alacritty-compile-release t
+  "If non-nil, compile in release mode (optimized)."
+  :type 'boolean
+  :group 'alacritty)
+
+(defcustom alacritty-cargo-args ""
+  "Additional arguments to pass to cargo when building the module."
+  :type 'string
+  :group 'alacritty)
+
+(defvar alacritty-install-buffer-name " *Install alacritty* "
+  "Name of the buffer used for compiling alacritty.")
+
+;; Module loading functions
+
 (defun alacritty--get-module-dir ()
   "Get the directory containing the alacritty source (with Cargo.toml)."
   (if alacritty-source-dir
@@ -112,42 +168,6 @@
       (defalias 'alacritty--module-redraw 'alacritty-emacs-alacritty--module-redraw)
       (defalias 'alacritty--module-redraw-with-damage 'alacritty-emacs-alacritty--module-redraw-with-damage)
       (setq alacritty-module-loaded t))))
-
-;; Customization
-
-(defgroup alacritty nil
-  "Alacritty terminal emulator for Emacs."
-  :group 'terminals)
-
-(defcustom alacritty-source-dir nil
-  "Directory containing the alacritty source code (with Cargo.toml)."
-  :type '(choice (const :tag "Auto-detect" nil)
-                 (directory :tag "Source directory"))
-  :group 'alacritty)
-
-(defcustom alacritty-module-build-dir
-  (locate-user-emacs-file "alacritty")
-  "Directory where the compiled module will be stored."
-  :type 'directory
-  :group 'alacritty)
-
-(defcustom alacritty-always-compile-module nil
-  "If non-nil, automatically compile the module without prompting."
-  :type 'boolean
-  :group 'alacritty)
-
-(defcustom alacritty-compile-release t
-  "If non-nil, compile in release mode (optimized)."
-  :type 'boolean
-  :group 'alacritty)
-
-(defcustom alacritty-cargo-args ""
-  "Additional arguments to pass to cargo when building the module."
-  :type 'string
-  :group 'alacritty)
-
-(defvar alacritty-install-buffer-name " *Install alacritty* "
-  "Name of the buffer used for compiling alacritty.")
 
 (defun alacritty--cargo-is-available ()
   "Check if cargo is available in PATH."
@@ -481,10 +501,9 @@ Uses damage tracking to only redraw changed portions when possible."
       ;; Now do the redraw
       (let* ((result (alacritty--module-redraw-with-damage alacritty--term))
              (damage-type (nth 0 result))
-             (history-size (nth 1 result))
+             ;; history-size (nth 1) and alt-screen (nth 4) not used in this function
              (cursor-row (nth 2 result))
              (cursor-col (nth 3 result))
-             (alt-screen (nth 4 result))
              (wrap-flags (nth 5 result)))
         ;; Only update if there was actual damage
         (unless (eq damage-type 'none)
@@ -652,9 +671,10 @@ Handles the EVENT when the process exits."
                          path)))
     (if local-host-p
         (file-name-as-directory expanded-path)
+      ;; Use standard Tramp ssh method instead of deprecated /-: syntax
       (let ((tramp-path (if user
-                            (format "/-:%s@%s:%s" user host expanded-path)
-                          (format "/-:%s:%s" host expanded-path))))
+                            (format "/ssh:%s@%s:%s" user host expanded-path)
+                          (format "/ssh:%s:%s" host expanded-path))))
         (file-name-as-directory tramp-path)))))
 
 (defun alacritty--update-buffer-name ()
@@ -667,16 +687,22 @@ Handles the EVENT when the process exits."
   (add-hook 'window-size-change-functions #'alacritty--window-size-change nil t)
   (add-hook 'window-configuration-change-hook #'alacritty--window-config-change nil t))
 
-(defun alacritty--window-size-change (_frame)
-  "Handle window size changes."
+(defun alacritty--window-size-change (frame)
+  "Handle window size changes on FRAME."
   (when (and alacritty--term
              alacritty--process
-             (process-live-p alacritty--process)
-             (eq (current-buffer) (window-buffer)))
-    (let ((size (alacritty--get-window-size)))
-      (alacritty--module-resize alacritty--term (car size) (cdr size))
-      ;; Also tell Emacs to resize the PTY
-      (set-process-window-size alacritty--process (cdr size) (car size)))))
+             (process-live-p alacritty--process))
+    ;; Check if this buffer is visible in any window on the affected frame
+    (let ((buf (current-buffer)))
+      (dolist (win (window-list frame 'no-minibuf))
+        (when (eq (window-buffer win) buf)
+          (let* ((width (window-body-width win))
+                 (height (window-body-height win)))
+            (alacritty--module-resize alacritty--term width height)
+            ;; Also tell Emacs to resize the PTY
+            (set-process-window-size alacritty--process height width)
+            ;; Only process once even if buffer is in multiple windows
+            (cl-return)))))))
 
 (defun alacritty--window-config-change ()
   "Handle window configuration changes."
@@ -684,61 +710,123 @@ Handles the EVENT when the process exits."
 
 ;; Public commands
 
+(defun alacritty--create-terminal-buffer ()
+  "Create and initialize a new terminal buffer.
+Returns the buffer.  The caller should display the buffer before
+calling this function so window dimensions are available.
+Preserves `default-directory' from the calling buffer."
+  (let ((dir default-directory)
+        (buffer (generate-new-buffer "*alacritty*")))
+    (with-current-buffer buffer
+      (setq default-directory dir)
+      (alacritty-mode))
+    buffer))
+
+(defcustom alacritty-tramp-shells
+  '(("ssh" login-shell)
+    ("scp" login-shell)
+    ("docker" "/bin/sh"))
+  "The shell to use for remote Tramp connections.
+
+This is a list of (TRAMP-METHOD SHELL) pairs.  Use t as TRAMP-METHOD
+to specify a default shell for all methods.  Specific methods take
+precedence over t.
+
+Set SHELL to `login-shell' to use the user's login shell on the
+remote host (requires getent command on POSIX systems).
+
+You can specify a fallback shell as a second element:
+  ((\"ssh\" login-shell \"/bin/bash\") ...)"
+  :type '(alist :key-type string :value-type (repeat sexp))
+  :group 'alacritty)
+
+(defun alacritty--tramp-get-shell (method)
+  "Get the shell for a remote connection using Tramp METHOD.
+Returns the shell command to use, or nil if not configured."
+  (let* ((specs (cdr (assoc method alacritty-tramp-shells)))
+         (first (car specs))
+         (second (cadr specs)))
+    (if (or (eq first 'login-shell)
+            (and (consp first) (eq (cadr first) 'login-shell)))
+        ;; Try to determine login shell via getent
+        (let* ((entry (ignore-errors
+                        (with-output-to-string
+                          (with-current-buffer standard-output
+                            (unless (= 0 (process-file-shell-command
+                                          "getent passwd $LOGNAME"
+                                          nil (current-buffer) nil))
+                              (error "Unexpected return value"))
+                            (when (> (count-lines (point-min) (point-max)) 1)
+                              (error "Unexpected output"))))))
+               (shell (when entry
+                        (nth 6 (split-string entry ":" nil "[ \t\n\r]+")))))
+          (or shell second))
+      first)))
+
+(defun alacritty--get-shell ()
+  "Get the shell to use for the terminal.
+For remote directories, uses `alacritty-tramp-shells' configuration.
+For local directories, uses `alacritty-shell'."
+  (if (ignore-errors (file-remote-p default-directory))
+      (with-parsed-tramp-file-name default-directory nil
+        (or (alacritty--tramp-get-shell method)
+            (alacritty--tramp-get-shell t)
+            (with-connection-local-variables shell-file-name)
+            alacritty-shell))
+    alacritty-shell))
+
+(defun alacritty--start-terminal-process ()
+  "Start the terminal process in the current buffer.
+Must be called after the buffer is displayed in a window.
+If `default-directory' is a Tramp remote path, starts the shell
+on the remote host using Tramp's file handlers."
+  (let* ((size (alacritty--get-window-size))
+         (shell (alacritty--get-shell))
+         ;; Handle FreeBSD which doesn't support iutf8
+         (iutf8-arg (if (eq system-type 'berkeley-unix) "" "iutf8")))
+    ;; Create terminal state (no PTY - Emacs will handle that)
+    (setq alacritty--term
+          (alacritty--module-create (car size) (cdr size)
+                                    alacritty-max-scrollback))
+    ;; Create process with PTY
+    ;; The :file-handler t option makes Emacs use Tramp's file handlers
+    ;; when default-directory is a remote path, automatically starting
+    ;; the process on the remote host
+    (setq alacritty--process
+          (make-process
+           :name "alacritty"
+           :buffer (current-buffer)
+           :command `("/bin/sh" "-c"
+                      ,(format "stty -nl sane %s erase ^? rows %d columns %d >/dev/null && exec %s"
+                               iutf8-arg
+                               (cdr size) (car size) shell))
+           :connection-type 'pty
+           :file-handler t
+           :filter #'alacritty--filter
+           :sentinel #'alacritty--sentinel))
+    ;; Setup window hooks
+    (alacritty--setup-window-hooks)))
+
 ;;;###autoload
 (defun alacritty ()
   "Create a new terminal buffer."
   (interactive)
   (alacritty--load-module)
-  (let ((buffer (generate-new-buffer "*alacritty*")))
-    (with-current-buffer buffer
-      (alacritty-mode))
+  (let ((buffer (alacritty--create-terminal-buffer)))
     ;; Switch to buffer first so we get correct window dimensions
     (switch-to-buffer buffer)
-    (let ((size (alacritty--get-window-size)))
-      (with-current-buffer buffer
-        ;; Create terminal state (no PTY - Emacs will handle that)
-        (setq alacritty--term
-              (alacritty--module-create (car size) (cdr size)
-                                        alacritty-max-scrollback))
-        ;; Create process with PTY - this is like vterm!
-        (setq alacritty--process
-              (make-process
-               :name "alacritty"
-               :buffer (current-buffer)
-               :command `("/bin/sh" "-c"
-                          ,(format "stty -nl sane iutf8 erase ^? rows %d columns %d >/dev/null && exec %s"
-                                   (cdr size) (car size) alacritty-shell))
-               :connection-type 'pty
-               :filter #'alacritty--filter
-               :sentinel #'alacritty--sentinel))
-        ;; Setup window hooks
-        (alacritty--setup-window-hooks)))))
+    (with-current-buffer buffer
+      (alacritty--start-terminal-process))))
 
 ;;;###autoload
 (defun alacritty-other-window ()
   "Create a new terminal buffer in another window."
   (interactive)
   (alacritty--load-module)
-  (let ((buffer (generate-new-buffer "*alacritty*")))
-    (with-current-buffer buffer
-      (alacritty-mode))
+  (let ((buffer (alacritty--create-terminal-buffer)))
     (switch-to-buffer-other-window buffer)
-    (let ((size (alacritty--get-window-size)))
-      (with-current-buffer buffer
-        (setq alacritty--term
-              (alacritty--module-create (car size) (cdr size)
-                                        alacritty-max-scrollback))
-        (setq alacritty--process
-              (make-process
-               :name "alacritty"
-               :buffer (current-buffer)
-               :command `("/bin/sh" "-c"
-                          ,(format "stty -nl sane iutf8 erase ^? rows %d columns %d >/dev/null && exec %s"
-                                   (cdr size) (car size) alacritty-shell))
-               :connection-type 'pty
-               :filter #'alacritty--filter
-               :sentinel #'alacritty--sentinel))
-        (alacritty--setup-window-hooks)))))
+    (with-current-buffer buffer
+      (alacritty--start-terminal-process))))
 
 (defun alacritty--cleanup ()
   "Clean up terminal resources when buffer is killed."
@@ -978,6 +1066,7 @@ Useful if the display gets out of sync."
 ;;;###autoload
 (defun alacritty--bookmark-handler (bmk)
   "Handler to restore a terminal bookmark BMK."
+  (alacritty--load-module)
   (let* ((thisdir (bookmark-prop-get bmk 'thisdir))
          (buf-name (bookmark-prop-get bmk 'buf-name))
          (buf (get-buffer buf-name))
@@ -986,22 +1075,12 @@ Useful if the display gets out of sync."
       (setq buf (generate-new-buffer buf-name))
       (with-current-buffer buf
         (setq default-directory thisdir)
-        (alacritty-mode)
-        (let ((size (alacritty--get-window-size)))
-          (setq alacritty--term
-                (alacritty--module-create (car size) (cdr size)
-                                          alacritty-max-scrollback))
-          (setq alacritty--process
-                (make-process
-                 :name "alacritty"
-                 :buffer (current-buffer)
-                 :command `("/bin/sh" "-c"
-                            ,(format "stty -nl sane iutf8 erase ^? rows %d columns %d >/dev/null && exec %s"
-                                     (cdr size) (car size) alacritty-shell))
-                 :connection-type 'pty
-                 :filter #'alacritty--filter
-                 :sentinel #'alacritty--sentinel))
-          (alacritty--setup-window-hooks))))
+        (alacritty-mode))
+      ;; Display the buffer first so window dimensions are available
+      (set-buffer buf)
+      (display-buffer buf)
+      (with-current-buffer buf
+        (alacritty--start-terminal-process)))
     (set-buffer buf)))
 
 (provide 'alacritty)
