@@ -170,6 +170,116 @@ Define Emacs commands callable from the terminal:
 
 Then call from shell: `alacritty_cmd find-file "/path/to/file"`
 
+## Comparison with vterm (emacs-libvterm)
+
+This section compares emacs-alacritty with [vterm](https://github.com/akermu/emacs-libvterm), the most popular terminal emulator for Emacs.
+
+### What alacritty.el does better
+
+| Feature | alacritty.el | vterm |
+|---------|-------------|-------|
+| **Terminal library** | Uses alacritty_terminal (Rust, actively maintained) | Uses libvterm (C library) |
+| **Build system** | Cargo (simple, cross-platform) | CMake with external dependencies |
+| **Remote support** | Native TRAMP integration with `:file-handler t` | Requires manual shell configuration per method |
+| **Architecture** | Emacs owns PTY, no polling needed | Module manages PTY with polling |
+| **Damage tracking** | Built-in partial redraw support | Full redraws more common |
+
+### What vterm does better (missing features)
+
+| Feature | vterm | alacritty.el | Priority |
+|---------|-------|--------------|----------|
+| **Prompt tracking** | Yes - marks prompt regions with text properties | No - only directory tracking via title | High |
+| **Prompt navigation** | `C-c C-n` / `C-c C-p` to jump between prompts | Not implemented | High |
+| **OSC 52 clipboard** | Full support with security toggle | Basic clipboard via events | Medium |
+| **vterm-eval-cmds whitelist** | Configurable command whitelist for security | Documented but not fully implemented | Medium |
+| **Scrollback in normal mode** | Visible scrollback with prompt navigation | Only visible in copy mode | Medium |
+| **vterm-send-next-key** | Sends any key including modifiers | Basic implementation | Low |
+| **Cursor shape/style** | Supports block, bar, underline | Not exposed to Emacs | Low |
+| **Multi-vterm support** | Mature ecosystem (multi-vterm, vterm-toggle) | Basic multi-buffer support | Low |
+| **Color palette customization** | `vterm-color-palette` with 16 named colors | Basic face definitions | Low |
+| **Keyboard exceptions** | `vterm-keymap-exceptions` list | Hardcoded C-c, C-x prefixes | Low |
+| **Window size minimum** | `vterm-min-window-width` | Not implemented | Low |
+
+### Feature parity checklist
+
+- [x] Basic terminal emulation
+- [x] True color (24-bit) support
+- [x] Copy mode with text selection
+- [x] Directory tracking via shell integration
+- [x] Bookmark support
+- [x] Shell integration scripts (bash, zsh, fish)
+- [x] Bracketed paste mode
+- [x] Alternate screen support
+- [x] Application cursor mode
+- [x] TRAMP remote support
+- [x] Exit hooks
+- [ ] Prompt tracking and navigation
+- [ ] Scrollback visible in normal mode
+- [ ] OSC 52 clipboard manipulation
+- [ ] Eval command whitelist security
+- [ ] Cursor shape control
+- [ ] Configurable keyboard exceptions
+- [ ] Color palette customization
+
+## Improvement Plan
+
+The following improvements are planned to reach feature parity with vterm. Items are ordered by priority.
+
+### Phase 1: Core Functionality (High Priority)
+
+1. **Prompt tracking and navigation**
+   - Implement prompt detection using OSC 51;A escape sequence (already parsed in shell scripts)
+   - Add `alacritty-prompt` text property to mark prompt regions
+   - Implement `alacritty-next-prompt` and `alacritty-previous-prompt` commands
+   - Add smart `alacritty-beginning-of-line` that respects prompt boundaries
+
+2. **Scrollback in normal mode**
+   - Currently scrollback history is only visible in copy mode
+   - Modify rendering to show scrollback in normal mode (like vterm)
+   - Keep cursor at correct position within visible area
+
+3. **Eval command whitelist**
+   - Implement `alacritty-eval-cmds` properly with security whitelist
+   - Parse OSC 51;E sequences and dispatch to whitelisted functions
+   - Document security implications
+
+### Phase 2: Polish (Medium Priority)
+
+4. **OSC 52 clipboard support**
+   - Add `alacritty-enable-manipulate-selection-data-by-osc52` option
+   - Implement clipboard load/store via OSC 52 sequences
+   - Default to disabled for security
+
+5. **Improved copy mode**
+   - Add `alacritty-copy-exclude-prompt` option
+   - Better integration with isearch
+
+6. **Configurable keyboard exceptions**
+   - Add `alacritty-keymap-exceptions` customization variable
+   - Allow users to choose which key prefixes bypass the terminal
+
+### Phase 3: Nice-to-Have (Low Priority)
+
+7. **Cursor shape control**
+   - Expose cursor style from terminal to Emacs
+   - Support block, bar, and underline cursors
+
+8. **Color palette customization**
+   - Add `alacritty-color-palette` for easy theme integration
+   - Inherit from term-color-* faces for consistency
+
+9. **Window size constraints**
+   - Add `alacritty-min-window-width` and `alacritty-min-window-height`
+   - Prevent terminal from becoming too small
+
+10. **Enhanced modifier key handling**
+    - Improve `alacritty-send-next-key` to handle all modifier combinations
+    - Better Meta key passthrough
+
+## Contributing
+
+Contributions are welcome! Please see the improvement plan above for areas that need work.
+
 ## License
 
 GNU General Public License v3.0 or later. See [LICENSE](LICENSE) for details.
