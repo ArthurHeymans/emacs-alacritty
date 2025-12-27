@@ -422,6 +422,10 @@ This is set to t when the first OSC 51;A sequence is received from the shell.")
     (define-key map (kbd "<next>") #'alacritty-send-page-down)
     (define-key map (kbd "<insert>") #'alacritty-send-insert)
     
+    ;; Scrollback navigation (Shift+PageUp/Down scroll the buffer like vterm)
+    (define-key map (kbd "S-<prior>") #'scroll-down-command)
+    (define-key map (kbd "S-<next>") #'scroll-up-command)
+    
     ;; Function keys
     (define-key map (kbd "<f1>") (lambda () (interactive) (alacritty--send-key "f1")))
     (define-key map (kbd "<f2>") (lambda () (interactive) (alacritty--send-key "f2")))
@@ -586,7 +590,8 @@ This is set to t when the first OSC 51;A sequence is received from the shell.")
 
 (defun alacritty--do-render ()
   "Perform the actual rendering of terminal content to the buffer.
-Uses damage tracking to only redraw changed portions when possible."
+Uses damage tracking to only redraw changed portions when possible.
+Now includes scrollback history in normal mode (like vterm)."
   (let ((inhibit-redisplay t)
         (inhibit-read-only t))
     (when alacritty--term
@@ -597,17 +602,21 @@ Uses damage tracking to only redraw changed portions when possible."
       ;; Now do the redraw
       (let* ((result (alacritty--module-redraw-with-damage alacritty--term))
              (damage-type (nth 0 result))
-             ;; history-size (nth 1) and alt-screen (nth 4) not used in this function
+             (history-size (nth 1 result))
              (cursor-row (nth 2 result))
              (cursor-col (nth 3 result))
+             (alt-screen (nth 4 result))
              (wrap-flags (nth 5 result)))
         ;; Only update if there was actual damage
         (unless (eq damage-type 'none)
           ;; Update fake newlines for copy mode
           (setq alacritty--fake-newlines (mapcar #'1+ wrap-flags))
-          ;; Position cursor - we only render visible screen now, no history offset
+          ;; Position cursor - account for scrollback history
           (goto-char (point-min))
-          (forward-line cursor-row)
+          (if alt-screen
+              (forward-line cursor-row)
+            ;; In normal mode, cursor is offset by history size
+            (forward-line (+ history-size cursor-row)))
           ;; Move to correct column, accounting for wide characters
           (let ((line-end (line-end-position))
                 (target-col cursor-col)
@@ -618,10 +627,12 @@ Uses damage tracking to only redraw changed portions when possible."
                      (w (if c (char-width c) 1)))
                 (setq visual-col (+ visual-col w))
                 (forward-char 1))))
-          ;; Recenter if needed
+          ;; Recenter to keep cursor visible at bottom of window (like a terminal)
           (when (eq (current-buffer) (window-buffer))
-            (let ((win-height (window-body-height)))
-              (recenter (min cursor-row (1- win-height))))))))))
+            (let* ((win-height (window-body-height))
+                   ;; Position cursor near bottom of window, leaving a few lines
+                   (target-line (max 0 (- win-height 1))))
+              (recenter target-line))))))))
 
 (defun alacritty--do-render-full ()
   "Perform a full redraw of terminal content (ignores damage tracking).
@@ -1126,7 +1137,10 @@ START-LINE is the 1-indexed line number where the text starts."
     (alacritty--remove-fake-newlines text start-line)))
 
 (defun alacritty-copy-mode ()
-  "Toggle copy mode."
+  "Toggle copy mode.
+In copy mode, terminal updates are paused and you can navigate
+freely with standard Emacs movement commands.  Scrollback history
+is always visible in the buffer (like vterm)."
   (interactive)
   (setq alacritty--copy-mode (not alacritty--copy-mode))
   (if alacritty--copy-mode
@@ -1135,12 +1149,11 @@ START-LINE is the 1-indexed line number where the text starts."
         (use-local-map alacritty-copy-mode-map)
         (setq-local filter-buffer-substring-function
                     #'alacritty--filter-buffer-substring)
-        ;; Do a full redraw to include scrollback history
-        (alacritty--do-render-full)
+        ;; Scrollback is already visible, just pause updates
         (message "Copy mode enabled. Press 'q' to exit, RET to copy selection."))
     (use-local-map alacritty-mode-map)
     (kill-local-variable 'filter-buffer-substring-function)
-    ;; Redraw without scrollback for normal mode
+    ;; Trigger a redraw to update cursor position after exiting copy mode
     (alacritty--do-render)
     (message "Copy mode disabled.")))
 
@@ -1196,14 +1209,18 @@ Returns nil if prompt tracking is not enabled or no prompt is found."
              alacritty--term)
     (let* ((positions (alacritty--module-get-prompt-positions alacritty--term))
            (history-size (alacritty--module-history-size alacritty--term))
+           (alt-screen (alacritty--module-alt-screen-mode alacritty--term))
            (current-line (line-number-at-pos)))
       ;; Find the prompt that's on or before the current line
       (catch 'found
         (dolist (pos (reverse positions))
           (let* ((term-line (car pos))
                  ;; Convert terminal line to buffer line
-                 ;; Terminal lines are relative to viewport, buffer lines are 1-indexed
-                 (buffer-line (+ term-line history-size 1)))
+                 ;; In alt screen: lines are 0-indexed from start
+                 ;; In normal mode: lines are offset by history size
+                 (buffer-line (if alt-screen
+                                  (1+ term-line)
+                                (+ term-line history-size 1))))
             (when (<= buffer-line current-line)
               (save-excursion
                 (goto-char (point-min))
@@ -1222,12 +1239,15 @@ With prefix argument N, move forward N prompts."
            alacritty--term)
       (let* ((positions (alacritty--module-get-prompt-positions alacritty--term))
              (history-size (alacritty--module-history-size alacritty--term))
+             (alt-screen (alacritty--module-alt-screen-mode alacritty--term))
              (current-line (line-number-at-pos))
              (found-count 0))
         (catch 'done
           (dolist (pos positions)
             (let* ((term-line (car pos))
-                   (buffer-line (+ term-line history-size 1)))
+                   (buffer-line (if alt-screen
+                                    (1+ term-line)
+                                  (+ term-line history-size 1))))
               (when (> buffer-line current-line)
                 (setq found-count (1+ found-count))
                 (when (= found-count n)
@@ -1249,12 +1269,15 @@ With prefix argument N, move backward N prompts."
            alacritty--term)
       (let* ((positions (alacritty--module-get-prompt-positions alacritty--term))
              (history-size (alacritty--module-history-size alacritty--term))
+             (alt-screen (alacritty--module-alt-screen-mode alacritty--term))
              (current-line (line-number-at-pos))
              (found-count 0))
         (catch 'done
           (dolist (pos (reverse positions))
             (let* ((term-line (car pos))
-                   (buffer-line (+ term-line history-size 1)))
+                   (buffer-line (if alt-screen
+                                    (1+ term-line)
+                                  (+ term-line history-size 1))))
               (when (< buffer-line current-line)
                 (setq found-count (1+ found-count))
                 (when (= found-count n)

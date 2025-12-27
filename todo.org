@@ -1,0 +1,48 @@
+#+title: Todo
+
+| Feature | emacs-libvterm | emacs-alacritty |
+|---------|----------------|-----------------|
+| Prompt Tracking/Navigation | vterm-next-prompt, vterm-previous-prompt (C-c C-n/p) | ❌ Missing |
+| Bright Color Faces | 16 colors (8 normal + 8 bright variants) | Only 8 basic color faces defined |
+| Bookmark Support | Full bookmark integration | ❌ Missing |
+| Compilation Mode | compilation-shell-minor-mode, next-error navigation | ❌ Missing |
+| Smart Line Navigation | vterm-beginning-of-line (after prompt) | ❌ Missing |
+| Cursor Reset | vterm-reset-cursor-point (C-c C-r) | ❌ Missing |
+| Undo to Shell | vterm-send-undo (C-_) | ❌ Missing |
+| OSC 52 Clipboard | Optional OSC 52 support | ❌ Missing (uses custom clipboard events) |
+| Fake Newline Handling | Removes fake newlines in copy mode | ❌ Missing |
+| Copy Exclude Prompt | vterm-copy-exclude-prompt option | ❌ Missing |
+| Font Property Controls | vterm-disable-bold-font, vterm-disable-underline, vterm-disable-inverse-video | ❌ Missing |
+| Bold → Bright Colors | vterm-set-bold-highbright | ❌ Missing |
+| Yank-Pop | vterm-yank-pop | ❌ Missing |
+| Mouse Yank Primary | vterm-yank-primary | ❌ Missing |
+| Min Window Width | vterm-min-window-width (80) | ❌ Missing |
+| Text Scale Mode Fix | Line number height fix for scaled text | ❌ Missing |
+| Send Next Key | vterm-send-next-key (C-q suggested) | Has emacs-alacritty-send-next-key (C-c C-q) ✅ |
+| More Keybinding Exceptions | vterm-keymap-exceptions list | Hardcoded exceptions |
+| Exit Hook | vterm-exit-functions | ❌ Missing |
+| Ignore Blink Cursor | vterm-ignore-blink-cursor | ❌ Missing |
+
+Notable missing functionality in detail:
+1. Prompt Navigation - Very useful for navigating between shell prompts (C-c C-n / C-c C-p)
+2. Compilation Mode Integration - Allows next-error to work in terminal buffers, jumping to errors
+3. Bookmark Support - Save and restore terminal sessions with Emacs bookmarks
+4. Bright Color Faces - emacs-alacritty only defines 8 basic faces; libvterm has 16 (with bright variants)
+5. Copy Mode Refinements:
+   - Fake newline handling (removing line-wrap artifacts)
+   - Option to exclude prompt from copied text
+   - yank-pop support
+6. Font/Display Customization:
+   - Toggle bold/underline/inverse-video rendering
+   - Bold-as-bright-colors option
+7. Smart Beginning of Line - Moves to after the prompt, not absolute beginning
+8. Exit Functions Hook - Let users run code when terminal exits
+Would you like me to help implement any of these missing features?
+
+* DONE copy mode
+CLOSED: [2025-12-18 Thu 18:44]
+* DONE exit hook
+CLOSED: [2025-12-18 Thu 19:03]
+* DONE bookmark supprt
+CLOSED: [2025-12-18 Thu 18:49]
+* birght faces, font customization

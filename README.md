@@ -67,6 +67,8 @@ nix develop
 | `C-c C-p` | Jump to previous prompt |
 | `C-y` | Yank from kill ring |
 | `M-y` | Yank pop |
+| `S-<prior>` | Scroll up (view scrollback history) |
+| `S-<next>` | Scroll down |
 
 Standard terminal keys (arrows, function keys, etc.) are passed through to the terminal.
 
@@ -207,7 +209,7 @@ This section compares emacs-alacritty with [vterm](https://github.com/akermu/ema
 |---------|-------|--------------|----------|
 | **Prompt tracking** | Yes - marks prompt regions with text properties | No - only directory tracking via title | High |
 | **Prompt navigation** | `C-c C-n` / `C-c C-p` to jump between prompts | Not implemented | High |
-| **Scrollback in normal mode** | Visible scrollback with prompt navigation | Only visible in copy mode | Medium |
+| **Scrollback in normal mode** | Visible scrollback with prompt navigation | Yes - S-prior/S-next to scroll | Done |
 | **vterm-send-next-key** | Sends any key including modifiers | Basic implementation | Low |
 | **Cursor shape/style** | Supports block, bar, underline | Not exposed to Emacs | Low |
 | **Multi-vterm support** | Mature ecosystem (multi-vterm, vterm-toggle) | Basic multi-buffer support | Low |
@@ -228,7 +230,7 @@ This section compares emacs-alacritty with [vterm](https://github.com/akermu/ema
 - [x] TRAMP remote support
 - [x] Exit hooks
 - [x] Prompt tracking and navigation
-- [ ] Scrollback visible in normal mode
+- [x] Scrollback visible in normal mode
 - [x] OSC 52 clipboard manipulation
 - [x] Eval command whitelist security
 - [ ] Cursor shape control
@@ -246,10 +248,10 @@ The following improvements are planned to reach feature parity with vterm. Items
    - `alacritty-next-prompt` (`C-c C-n`) and `alacritty-previous-prompt` (`C-c C-p`) commands
    - Smart `alacritty-beginning-of-line` that respects prompt boundaries in copy mode
 
-2. **Scrollback in normal mode**
-   - Currently scrollback history is only visible in copy mode
-   - Modify rendering to show scrollback in normal mode (like vterm)
-   - Keep cursor at correct position within visible area
+2. **Scrollback in normal mode** ✓
+   - Scrollback history is now always visible in the buffer (like vterm)
+   - Use `S-<prior>` (Shift+PageUp) and `S-<next>` (Shift+PageDown) to scroll
+   - Cursor is kept at correct position within the visible area
 
 3. **Eval command whitelist** ✓
    - Implemented `alacritty-eval-cmds` with security whitelist

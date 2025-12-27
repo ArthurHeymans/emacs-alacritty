@@ -672,6 +672,7 @@ fn redraw<'e>(env: &'e Env, term: &AlacrittyTerm) -> Result<Value<'e>> {
 }
 
 /// Redraw terminal using damage tracking for partial updates
+/// Now always includes scrollback history (like vterm) unless in alt screen mode.
 /// Returns: (damage-type history-size cursor-row cursor-col is-alt-screen wrap-flags)
 /// damage-type is 'full, 'partial, or 'none
 #[defun(name = "alacritty--module-redraw-with-damage")]
@@ -703,20 +704,39 @@ fn redraw_with_damage<'e>(env: &'e Env, term: &AlacrittyTerm) -> Result<Value<'e
     let syms = RenderSymbolsWithDamage::new(env)?;
 
     let damage_type_sym = if is_full_damage {
-        // Full redraw needed - only render visible screen lines for performance
-        // Scrollback history is rendered on-demand in copy mode via alacritty-redraw
+        // Full redraw needed
         env.call(syms.base.erase_buffer, [])?;
 
-        for line_idx in 0..screen_lines {
-            let row = &grid[Line(line_idx)];
-            let min_cols = if line_idx == cursor.line.0 {
-                Some(cursor.column.0 + 1)
-            } else {
-                None
-            };
-            insert_line_content(env, row, num_cols, min_cols, &syms.base)?;
-            if line_idx < screen_lines - 1 {
-                env.call(syms.base.insert_fn, [syms.base.newline])?;
+        if alt_screen {
+            // Alt screen: only visible lines (no scrollback)
+            for line_idx in 0..screen_lines {
+                let row = &grid[Line(line_idx)];
+                let min_cols = if line_idx == cursor.line.0 {
+                    Some(cursor.column.0 + 1)
+                } else {
+                    None
+                };
+                insert_line_content(env, row, num_cols, min_cols, &syms.base)?;
+                if line_idx < screen_lines - 1 {
+                    env.call(syms.base.insert_fn, [syms.base.newline])?;
+                }
+            }
+        } else {
+            // Normal mode: include scrollback history (like vterm)
+            let start_line = -(history_size as i32);
+            for line_idx in start_line..screen_lines {
+                let row = &grid[Line(line_idx)];
+                // On cursor line, preserve whitespace up to cursor position
+                let min_cols = if line_idx == cursor.line.0 {
+                    Some(cursor.column.0 + 1)
+                } else {
+                    None
+                };
+                insert_line_content(env, row, num_cols, min_cols, &syms.base)?;
+                // Add newline after each line except the last visible line
+                if line_idx < screen_lines - 1 {
+                    env.call(syms.base.insert_fn, [syms.base.newline])?;
+                }
             }
         }
         env.intern("full")?
@@ -725,10 +745,15 @@ fn redraw_with_damage<'e>(env: &'e Env, term: &AlacrittyTerm) -> Result<Value<'e
         env.intern("none")?
     } else {
         // Partial redraw - only update damaged lines
+        // Note: damage tracking only applies to visible screen, not scrollback
         for damage in &damaged_lines {
             // Calculate buffer line number (1-based for Emacs)
-            // We only render visible screen lines, so damage.line maps directly
-            let buffer_line = (damage.line as i64) + 1;
+            // Account for scrollback: buffer_line = history_size + damage.line + 1
+            let buffer_line = if alt_screen {
+                (damage.line as i64) + 1
+            } else {
+                history_size + (damage.line as i64) + 1
+            };
 
             // Go to the damaged line
             env.call(syms.goto_line, [buffer_line.into_lisp(env)?])?;
@@ -754,14 +779,30 @@ fn redraw_with_damage<'e>(env: &'e Env, term: &AlacrittyTerm) -> Result<Value<'e
         env.intern("partial")?
     };
 
-    // Build wrap flags list (before resetting damage, while we still have the grid borrow)
+    // Build wrap flags list for visible screen lines
+    // Include history offset so Elisp can correctly identify wrapped lines
     let mut wrap_flags = syms.base.nil;
-    for line_idx in (0..screen_lines).rev() {
-        let row = &grid[Line(line_idx)];
-        let last_col = num_cols.saturating_sub(1);
-        if row[Column(last_col)].flags.contains(CellFlags::WRAPLINE) {
-            let idx_val = (line_idx as i64).into_lisp(env)?;
-            wrap_flags = env.cons(idx_val, wrap_flags)?;
+    if alt_screen {
+        for line_idx in (0..screen_lines).rev() {
+            let row = &grid[Line(line_idx)];
+            let last_col = num_cols.saturating_sub(1);
+            if row[Column(last_col)].flags.contains(CellFlags::WRAPLINE) {
+                let idx_val = (line_idx as i64).into_lisp(env)?;
+                wrap_flags = env.cons(idx_val, wrap_flags)?;
+            }
+        }
+    } else {
+        // Include scrollback lines in wrap flag calculation
+        let start_line = -(history_size as i32);
+        for line_idx in (start_line..screen_lines).rev() {
+            let row = &grid[Line(line_idx)];
+            let last_col = num_cols.saturating_sub(1);
+            if row[Column(last_col)].flags.contains(CellFlags::WRAPLINE) {
+                // Convert to buffer line number (0-indexed from start of buffer)
+                let buffer_line_idx = (line_idx + history_size as i32) as i64;
+                let idx_val = buffer_line_idx.into_lisp(env)?;
+                wrap_flags = env.cons(idx_val, wrap_flags)?;
+            }
         }
     }
 
