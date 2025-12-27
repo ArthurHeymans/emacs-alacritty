@@ -100,7 +100,8 @@
       (defalias 'alacritty--module-resize 'alacritty-emacs-alacritty--module-resize)
       (defalias 'alacritty--module-take-events 'alacritty-emacs-alacritty--module-take-events)
       (defalias 'alacritty--module-is-dirty 'alacritty-emacs-alacritty--module-is-dirty)
-      (defalias 'alacritty--module-clear-dirty 'alacritty-emacs-alacritty--module-clear-dirty)
+      (defalias 'alacritty--module-reset-damage 'alacritty-emacs-alacritty--module-reset-damage)
+      (defalias 'alacritty--module-get-damage 'alacritty-emacs-alacritty--module-get-damage)
       (defalias 'alacritty--module-cursor-row 'alacritty-emacs-alacritty--module-cursor-row)
       (defalias 'alacritty--module-cursor-col 'alacritty-emacs-alacritty--module-cursor-col)
       (defalias 'alacritty--module-get-title 'alacritty-emacs-alacritty--module-get-title)
@@ -109,6 +110,7 @@
       (defalias 'alacritty--module-bracketed-paste-mode 'alacritty-emacs-alacritty--module-bracketed-paste-mode)
       (defalias 'alacritty--module-history-size 'alacritty-emacs-alacritty--module-history-size)
       (defalias 'alacritty--module-redraw 'alacritty-emacs-alacritty--module-redraw)
+      (defalias 'alacritty--module-redraw-with-damage 'alacritty-emacs-alacritty--module-redraw-with-damage)
       (setq alacritty-module-loaded t))))
 
 ;; Customization
@@ -203,9 +205,11 @@
   :type 'boolean
   :group 'alacritty)
 
-(defcustom alacritty-timer-delay 0.033
+(defcustom alacritty-timer-delay 0.1
   "Delay for coalescing redraws (in seconds).
 A larger delay improves performance when receiving bursts of data.
+Set to 0.1 to match vterm's default (good for large output bursts).
+Set to 0.033 for smoother visual updates (~30 FPS).
 If nil, redraw immediately."
   :type 'number
   :group 'alacritty)
@@ -358,6 +362,7 @@ If nil, redraw immediately."
     ;; Emacs-specific commands
     (define-key map (kbd "C-c C-t") #'alacritty-copy-mode)
     (define-key map (kbd "C-c C-l") #'alacritty-clear-scrollback)
+    (define-key map (kbd "C-c C-r") #'alacritty-redraw)
     (define-key map (kbd "C-c C-q") #'alacritty-send-next-key)
     
     map)
@@ -464,7 +469,48 @@ If nil, redraw immediately."
   (cons (window-body-width) (window-body-height)))
 
 (defun alacritty--do-render ()
-  "Perform the actual rendering of terminal content to the buffer."
+  "Perform the actual rendering of terminal content to the buffer.
+Uses damage tracking to only redraw changed portions when possible."
+  (let ((inhibit-redisplay t)
+        (inhibit-read-only t))
+    (when alacritty--term
+      ;; Handle any pending events first (title changes, bell, etc.)
+      (let ((events (alacritty--module-take-events alacritty--term)))
+        (when events
+          (alacritty--handle-events events)))
+      ;; Now do the redraw
+      (let* ((result (alacritty--module-redraw-with-damage alacritty--term))
+             (damage-type (nth 0 result))
+             (history-size (nth 1 result))
+             (cursor-row (nth 2 result))
+             (cursor-col (nth 3 result))
+             (alt-screen (nth 4 result))
+             (wrap-flags (nth 5 result)))
+        ;; Only update if there was actual damage
+        (unless (eq damage-type 'none)
+          ;; Update fake newlines for copy mode
+          (setq alacritty--fake-newlines (mapcar #'1+ wrap-flags))
+          ;; Position cursor - we only render visible screen now, no history offset
+          (goto-char (point-min))
+          (forward-line cursor-row)
+          ;; Move to correct column, accounting for wide characters
+          (let ((line-end (line-end-position))
+                (target-col cursor-col)
+                (visual-col 0))
+            (while (and (< (point) line-end)
+                        (< visual-col target-col))
+              (let* ((c (char-after))
+                     (w (if c (char-width c) 1)))
+                (setq visual-col (+ visual-col w))
+                (forward-char 1))))
+          ;; Recenter if needed
+          (when (eq (current-buffer) (window-buffer))
+            (let ((win-height (window-body-height)))
+              (recenter (min cursor-row (1- win-height))))))))))
+
+(defun alacritty--do-render-full ()
+  "Perform a full redraw of terminal content (ignores damage tracking).
+Use this when you need to force a complete refresh."
   (let ((inhibit-redisplay t)
         (inhibit-read-only t))
     (when alacritty--term
@@ -491,6 +537,8 @@ If nil, redraw immediately."
                    (w (if c (char-width c) 1)))
               (setq visual-col (+ visual-col w))
               (forward-char 1))))
+        ;; Reset damage state after full redraw
+        (alacritty--module-reset-damage alacritty--term)
         ;; Recenter if needed
         (when (eq (current-buffer) (window-buffer))
           (let ((win-height (window-body-height)))
@@ -550,11 +598,7 @@ This is the key function - called by Emacs when PTY data arrives."
         (when alacritty--term
           ;; Feed data to terminal - this is where the magic happens!
           (alacritty--module-process-bytes alacritty--term input)
-          ;; Handle any events generated
-          (let ((events (alacritty--module-take-events alacritty--term)))
-            (when events
-              (alacritty--handle-events events)))
-          ;; Trigger redraw
+          ;; Trigger redraw (events are handled in the redraw phase)
           (alacritty--invalidate))))))
 
 (defun alacritty--sentinel (process event)
@@ -875,9 +919,13 @@ START-LINE is the 1-indexed line number where the text starts."
         (use-local-map alacritty-copy-mode-map)
         (setq-local filter-buffer-substring-function
                     #'alacritty--filter-buffer-substring)
+        ;; Do a full redraw to include scrollback history
+        (alacritty--do-render-full)
         (message "Copy mode enabled. Press 'q' to exit, RET to copy selection."))
     (use-local-map alacritty-mode-map)
     (kill-local-variable 'filter-buffer-substring-function)
+    ;; Redraw without scrollback for normal mode
+    (alacritty--do-render)
     (message "Copy mode disabled.")))
 
 (defun alacritty-copy-mode-done ()
@@ -909,6 +957,13 @@ START-LINE is the 1-indexed line number where the text starts."
   "Send STRING to the terminal."
   (interactive "sSend string: ")
   (alacritty--send-string string))
+
+(defun alacritty-redraw ()
+  "Force a full redraw of the terminal.
+This ignores damage tracking and redraws everything.
+Useful if the display gets out of sync."
+  (interactive)
+  (alacritty--do-render-full))
 
 ;; Bookmark support
 

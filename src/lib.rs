@@ -9,10 +9,11 @@ use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags as CellFlags;
-use alacritty_terminal::term::{Config, Term, TermMode};
+use alacritty_terminal::term::{Config, Term, TermDamage, TermMode};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor};
 use emacs::{defun, Env, IntoLisp, Result, Value};
 use parking_lot::Mutex;
+
 use std::sync::Arc;
 
 emacs::plugin_is_GPL_compatible!();
@@ -94,7 +95,6 @@ pub struct AlacrittyTerm {
     event_listener: EmacsEventListener,
     size: Mutex<TermSize>,
     title: Mutex<String>,
-    dirty: Mutex<bool>,
 }
 
 impl AlacrittyTerm {
@@ -115,7 +115,6 @@ impl AlacrittyTerm {
             event_listener,
             size: Mutex::new(size),
             title: Mutex::new(String::new()),
-            dirty: Mutex::new(true),
         }
     }
 
@@ -125,7 +124,6 @@ impl AlacrittyTerm {
         let mut term = self.term.lock();
         let mut processor = self.processor.lock();
         processor.advance(&mut *term, bytes);
-        *self.dirty.lock() = true;
     }
 
     fn resize(&self, cols: usize, lines: usize) {
@@ -133,7 +131,6 @@ impl AlacrittyTerm {
         size.cols = cols;
         size.lines = lines;
         self.term.lock().resize(*size);
-        *self.dirty.lock() = true;
     }
 
     /// Take collected events (title changes, bell, clipboard, pty writes)
@@ -148,12 +145,19 @@ impl AlacrittyTerm {
         events
     }
 
+    /// Check if terminal has any damage (needs redraw)
+    /// Uses alacritty_terminal's built-in damage tracking
     fn is_dirty(&self) -> bool {
-        *self.dirty.lock()
+        let mut term = self.term.lock();
+        match term.damage() {
+            TermDamage::Full => true,
+            TermDamage::Partial(iter) => iter.count() > 0,
+        }
     }
 
-    fn clear_dirty(&self) {
-        *self.dirty.lock() = false;
+    /// Reset damage state after redraw
+    fn reset_damage(&self) {
+        self.term.lock().reset_damage();
     }
 
     fn cursor_position(&self) -> (usize, usize) {
@@ -320,11 +324,40 @@ fn is_dirty(term: &AlacrittyTerm) -> Result<bool> {
     Ok(term.is_dirty())
 }
 
-/// Clear dirty flag
-#[defun(name = "alacritty--module-clear-dirty")]
-fn clear_dirty(term: &AlacrittyTerm) -> Result<()> {
-    term.clear_dirty();
+/// Reset damage state after redraw
+#[defun(name = "alacritty--module-reset-damage")]
+fn reset_damage(term: &AlacrittyTerm) -> Result<()> {
+    term.reset_damage();
     Ok(())
+}
+
+/// Get terminal damage information
+/// Returns: 'full if entire terminal needs redraw, or a list of (line left right) for damaged regions
+/// Each element represents a line with damaged columns from left to right (inclusive)
+#[defun(name = "alacritty--module-get-damage")]
+fn get_damage<'e>(env: &'e Env, term: &AlacrittyTerm) -> Result<Value<'e>> {
+    let mut term_lock = term.term.lock();
+    let nil = env.intern("nil")?;
+
+    match term_lock.damage() {
+        TermDamage::Full => env.intern("full"),
+        TermDamage::Partial(iter) => {
+            let mut result = nil;
+            // Collect damage info in reverse order so we can build list with cons
+            let damages: Vec<_> = iter.collect();
+            for damage in damages.into_iter().rev() {
+                let line_val = (damage.line as i64).into_lisp(env)?;
+                let left_val = (damage.left as i64).into_lisp(env)?;
+                let right_val = (damage.right as i64).into_lisp(env)?;
+                // Build (line left right) list
+                let entry = env.cons(right_val, nil)?;
+                let entry = env.cons(left_val, entry)?;
+                let entry = env.cons(line_val, entry)?;
+                result = env.cons(entry, result)?;
+            }
+            Ok(result)
+        }
+    }
 }
 
 /// Get cursor row
@@ -448,6 +481,142 @@ fn redraw<'e>(env: &'e Env, term: &AlacrittyTerm) -> Result<Value<'e>> {
     let result = env.cons(history_size.into_lisp(env)?, result)?;
 
     Ok(result)
+}
+
+/// Redraw terminal using damage tracking for partial updates
+/// Returns: (damage-type history-size cursor-row cursor-col is-alt-screen wrap-flags)
+/// damage-type is 'full, 'partial, or 'none
+#[defun(name = "alacritty--module-redraw-with-damage")]
+fn redraw_with_damage<'e>(env: &'e Env, term: &AlacrittyTerm) -> Result<Value<'e>> {
+    let mut term_lock = term.term.lock();
+    let alt_screen = term_lock.mode().contains(TermMode::ALT_SCREEN);
+
+    // Get damage info before we borrow grid
+    let damage = term_lock.damage();
+    let is_full_damage = matches!(damage, TermDamage::Full);
+    let damaged_lines: Vec<_> = match damage {
+        TermDamage::Full => Vec::new(),
+        TermDamage::Partial(iter) => iter.collect(),
+    };
+
+    let grid = term_lock.grid();
+    let cursor = grid.cursor.point;
+    let cursor_row = if cursor.line.0 < 0 {
+        0
+    } else {
+        cursor.line.0 as i64
+    };
+    let cursor_col = cursor.column.0 as i64;
+    let num_cols = grid.columns();
+    let screen_lines = grid.screen_lines() as i32;
+    let history_size = grid.total_lines().saturating_sub(grid.screen_lines()) as i64;
+
+    // Cache symbols
+    let syms = RenderSymbolsWithDamage::new(env)?;
+
+    let damage_type_sym = if is_full_damage {
+        // Full redraw needed - only render visible screen lines for performance
+        // Scrollback history is rendered on-demand in copy mode via alacritty-redraw
+        env.call(syms.base.erase_buffer, [])?;
+
+        for line_idx in 0..screen_lines {
+            let row = &grid[Line(line_idx)];
+            let min_cols = if line_idx == cursor.line.0 {
+                Some(cursor.column.0 + 1)
+            } else {
+                None
+            };
+            insert_line_content(env, row, num_cols, min_cols, &syms.base)?;
+            if line_idx < screen_lines - 1 {
+                env.call(syms.base.insert_fn, [syms.base.newline])?;
+            }
+        }
+        env.intern("full")?
+    } else if damaged_lines.is_empty() {
+        // No damage, nothing to redraw
+        env.intern("none")?
+    } else {
+        // Partial redraw - only update damaged lines
+        for damage in &damaged_lines {
+            // Calculate buffer line number (1-based for Emacs)
+            // We only render visible screen lines, so damage.line maps directly
+            let buffer_line = (damage.line as i64) + 1;
+
+            // Go to the damaged line
+            env.call(syms.goto_line, [buffer_line.into_lisp(env)?])?;
+
+            // Delete the current line content (but not the newline)
+            let line_start = env.call(syms.line_beginning_position, [])?;
+            let line_end = env.call(syms.line_end_position, [])?;
+            env.call(syms.delete_region, [line_start, line_end])?;
+
+            // Get the terminal line content
+            // damage.line is viewport-relative, convert to grid index
+            let grid_line = Line(damage.line as i32);
+            let row = &grid[grid_line];
+
+            // Render the damaged portion - for simplicity, redraw the whole line
+            let min_cols = if grid_line.0 == cursor.line.0 {
+                Some(cursor.column.0 + 1)
+            } else {
+                None
+            };
+            insert_line_content(env, row, num_cols, min_cols, &syms.base)?;
+        }
+        env.intern("partial")?
+    };
+
+    // Build wrap flags list (before resetting damage, while we still have the grid borrow)
+    let mut wrap_flags = syms.base.nil;
+    for line_idx in (0..screen_lines).rev() {
+        let row = &grid[Line(line_idx)];
+        let last_col = num_cols.saturating_sub(1);
+        if row[Column(last_col)].flags.contains(CellFlags::WRAPLINE) {
+            let idx_val = (line_idx as i64).into_lisp(env)?;
+            wrap_flags = env.cons(idx_val, wrap_flags)?;
+        }
+    }
+
+    // Build result before resetting damage
+    let result = env.cons(wrap_flags, syms.base.nil)?;
+    let alt_val = if alt_screen {
+        syms.base.t
+    } else {
+        syms.base.nil
+    };
+    let result = env.cons(alt_val, result)?;
+    let result = env.cons(cursor_col.into_lisp(env)?, result)?;
+    let result = env.cons(cursor_row.into_lisp(env)?, result)?;
+    let result = env.cons(history_size.into_lisp(env)?, result)?;
+    let result = env.cons(damage_type_sym, result)?;
+
+    // Reset damage after processing - need to drop grid borrow first
+    // The grid is borrowed from term_lock, so we need to end this scope
+    drop(term_lock);
+    term.reset_damage();
+
+    Ok(result)
+}
+
+/// Extended symbols for damage-aware rendering
+struct RenderSymbolsWithDamage<'e> {
+    base: RenderSymbols<'e>,
+    goto_line: Value<'e>,
+    line_beginning_position: Value<'e>,
+    line_end_position: Value<'e>,
+    delete_region: Value<'e>,
+}
+
+impl<'e> RenderSymbolsWithDamage<'e> {
+    fn new(env: &'e Env) -> Result<Self> {
+        Ok(Self {
+            base: RenderSymbols::new(env)?,
+            goto_line: env.intern("goto-line")?,
+            line_beginning_position: env.intern("line-beginning-position")?,
+            line_end_position: env.intern("line-end-position")?,
+            delete_region: env.intern("delete-region")?,
+        })
+    }
 }
 
 /// Cached Emacs symbols for rendering
