@@ -38,6 +38,7 @@
 (require 'subr-x)
 (require 'tramp)
 (require 'bookmark)
+(require 'term)
 
 ;; Load the dynamic module
 (defvar alacritty-module-path nil
@@ -63,6 +64,8 @@
 (declare-function alacritty--module-history-size "alacritty")
 (declare-function alacritty--module-redraw "alacritty")
 (declare-function alacritty--module-redraw-with-damage "alacritty")
+(declare-function alacritty--module-get-prompt-positions "alacritty")
+(declare-function alacritty--module-clear-prompt-positions "alacritty")
 
 ;; Customization - must be defined before functions that use them
 
@@ -167,6 +170,8 @@
       (defalias 'alacritty--module-history-size 'alacritty-emacs-alacritty--module-history-size)
       (defalias 'alacritty--module-redraw 'alacritty-emacs-alacritty--module-redraw)
       (defalias 'alacritty--module-redraw-with-damage 'alacritty-emacs-alacritty--module-redraw-with-damage)
+      (defalias 'alacritty--module-get-prompt-positions 'alacritty-emacs-alacritty--module-get-prompt-positions)
+      (defalias 'alacritty--module-clear-prompt-positions 'alacritty-emacs-alacritty--module-clear-prompt-positions)
       (setq alacritty-module-loaded t))))
 
 (defun alacritty--cargo-is-available ()
@@ -254,6 +259,38 @@ If nil, redraw immediately."
   :type 'hook
   :group 'alacritty)
 
+(defcustom alacritty-eval-cmds
+  '(("find-file" find-file)
+    ("message" message)
+    ("alacritty-clear-scrollback" alacritty-clear-scrollback))
+  "Whitelisted Emacs functions that can be executed from the terminal.
+
+You can execute Emacs functions directly from the terminal using shell
+integration scripts.  For example, `alacritty_cmd message \"Hello\"' will
+display \"Hello\" in the minibuffer.
+
+This is a list of (NAME-IN-SHELL EMACS-FUNCTION) pairs.  The shell sends
+commands via OSC 51;E escape sequences, and only functions in this whitelist
+will be executed for security reasons."
+  :type '(alist :key-type string :value-type (list function))
+  :group 'alacritty)
+
+(defcustom alacritty-use-prompt-detection-method t
+  "When non-nil, use shell-side prompt detection.
+
+Prompt detection requires shell-side configuration: the shell must emit
+the OSC 51;A escape sequence at the end of each prompt.  This allows
+features like prompt navigation and smart beginning-of-line.
+
+When nil, fall back to `term-prompt-regexp' for prompt detection."
+  :type 'boolean
+  :group 'alacritty)
+
+(defcustom alacritty-copy-exclude-prompt t
+  "When non-nil, exclude the prompt when copying the current line."
+  :type 'boolean
+  :group 'alacritty)
+
 ;; Faces for terminal colors
 
 (defface alacritty-color-black
@@ -315,6 +352,10 @@ If nil, redraw immediately."
 
 (defvar-local alacritty--fake-newlines nil
   "List of line numbers (1-indexed) that have fake newlines.")
+
+(defvar-local alacritty--prompt-tracking-enabled-p nil
+  "Non-nil if prompt tracking has been detected in this buffer.
+This is set to t when the first OSC 51;A sequence is received from the shell.")
 
 ;; Mode map
 
@@ -384,6 +425,9 @@ If nil, redraw immediately."
     (define-key map (kbd "C-c C-l") #'alacritty-clear-scrollback)
     (define-key map (kbd "C-c C-r") #'alacritty-redraw)
     (define-key map (kbd "C-c C-q") #'alacritty-send-next-key)
+    ;; Prompt navigation
+    (define-key map (kbd "C-c C-n") #'alacritty-next-prompt)
+    (define-key map (kbd "C-c C-p") #'alacritty-previous-prompt)
     
     map)
   "Keymap for `alacritty-mode'.")
@@ -405,8 +449,8 @@ If nil, redraw immediately."
     (define-key map (kbd "C-n") #'next-line)
     (define-key map (kbd "C-b") #'backward-char)
     (define-key map (kbd "C-f") #'forward-char)
-    (define-key map (kbd "C-a") #'beginning-of-line)
-    (define-key map (kbd "C-e") #'end-of-line)
+    (define-key map (kbd "C-a") #'alacritty-beginning-of-line)
+    (define-key map (kbd "C-e") #'alacritty-end-of-line)
     (define-key map (kbd "M-<") #'beginning-of-buffer)
     (define-key map (kbd "M->") #'end-of-buffer)
     (define-key map (kbd "<home>") #'beginning-of-buffer)
@@ -414,6 +458,9 @@ If nil, redraw immediately."
     (define-key map (kbd "C-s") #'isearch-forward)
     (define-key map (kbd "C-r") #'isearch-backward)
     (define-key map (kbd "C-SPC") #'set-mark-command)
+    ;; Prompt navigation in copy mode
+    (define-key map (kbd "C-c C-n") #'alacritty-next-prompt)
+    (define-key map (kbd "C-c C-p") #'alacritty-previous-prompt)
     map)
   "Keymap for `alacritty-copy-mode'.")
 
@@ -603,7 +650,16 @@ EVENTS is a list of (type . data) pairs."
          (blink-cursor-mode (if (cdr event) 1 -1))))
       ('pty-write
        ;; Terminal wants to write back to PTY (e.g., DA1 response)
-       (alacritty--send-string (cdr event))))))
+       (alacritty--send-string (cdr event)))
+      ('prompt-end
+       ;; OSC 51;A - prompt end with directory info (user@host:path)
+       (setq alacritty--prompt-tracking-enabled-p t)
+       (let ((data (cdr event)))
+         (when-let ((dir-info (alacritty--parse-directory-info data)))
+           (apply #'alacritty--set-directory dir-info))))
+      ('eval-command
+       ;; OSC 51;E - execute whitelisted Emacs command
+       (alacritty--eval (cdr event))))))
 
 (defun alacritty--filter (process input)
   "Process filter for terminal PROCESS.
@@ -641,16 +697,22 @@ Handles the EVENT when the process exits."
 
 (defun alacritty--parse-title-for-directory (title)
   "Parse TITLE for directory information."
-  (when (and title (stringp title))
+  (alacritty--parse-directory-info title))
+
+(defun alacritty--parse-directory-info (info)
+  "Parse INFO string for directory information.
+INFO can be in format \"user@host:path\" or \"host:path\".
+Returns (user host path) or nil if parsing fails."
+  (when (and info (stringp info))
     (cond
-     ((string-match "^\\([^@]+\\)@\\([^:]+\\):\\(.+\\)$" title)
-      (list (match-string 1 title)
-            (match-string 2 title)
-            (match-string 3 title)))
-     ((string-match "^\\([^:]+\\):\\(.+\\)$" title)
+     ((string-match "^\\([^@]+\\)@\\([^:]+\\):\\(.+\\)$" info)
+      (list (match-string 1 info)
+            (match-string 2 info)
+            (match-string 3 info)))
+     ((string-match "^\\([^:]+\\):\\(.+\\)$" info)
       (list nil
-            (match-string 1 title)
-            (match-string 2 title))))))
+            (match-string 1 info)
+            (match-string 2 info))))))
 
 (defun alacritty--set-directory (user host path)
   "Set `default-directory' based on USER, HOST, and PATH."
@@ -681,6 +743,18 @@ Handles the EVENT when the process exits."
   "Update the buffer name based on the terminal title."
   (when (and alacritty-buffer-name-string alacritty--title)
     (rename-buffer (format alacritty-buffer-name-string alacritty--title) t)))
+
+(defun alacritty--eval (str)
+  "Execute a command from the terminal if it's in `alacritty-eval-cmds'.
+STR is the command string, which may include quoted arguments."
+  (let* ((parts (split-string-and-unquote str))
+         (command (car parts))
+         (args (cdr parts))
+         (entry (assoc command alacritty-eval-cmds)))
+    (if entry
+        (apply (cadr entry) args)
+      (message "alacritty: Command '%s' not in whitelist.  Add it to `alacritty-eval-cmds' to enable."
+               command))))
 
 (defun alacritty--setup-window-hooks ()
   "Set up hooks to handle window size changes."
@@ -1029,11 +1103,149 @@ START-LINE is the 1-indexed line number where the text starts."
   (deactivate-mark)
   (alacritty-copy-mode))
 
+;; Prompt navigation commands
+
+(defun alacritty--prompt-tracking-enabled-p ()
+  "Return non-nil if prompt tracking is enabled and working.
+Prompt tracking requires shell-side configuration (OSC 51;A sequences)."
+  (or alacritty--prompt-tracking-enabled-p
+      ;; Check if we have any prompt positions stored
+      (and alacritty--term
+           (not (null (alacritty--module-get-prompt-positions alacritty--term))))))
+
+(defun alacritty--get-prompt-point ()
+  "Get the buffer position of the end of the current prompt.
+Returns nil if prompt tracking is not enabled or no prompt is found."
+  (when (and alacritty-use-prompt-detection-method
+             (alacritty--prompt-tracking-enabled-p)
+             alacritty--term)
+    (let* ((positions (alacritty--module-get-prompt-positions alacritty--term))
+           (history-size (alacritty--module-history-size alacritty--term))
+           (current-line (line-number-at-pos)))
+      ;; Find the prompt that's on or before the current line
+      (catch 'found
+        (dolist (pos (reverse positions))
+          (let* ((term-line (car pos))
+                 ;; Convert terminal line to buffer line
+                 ;; Terminal lines are relative to viewport, buffer lines are 1-indexed
+                 (buffer-line (+ term-line history-size 1)))
+            (when (<= buffer-line current-line)
+              (save-excursion
+                (goto-char (point-min))
+                (forward-line (1- buffer-line))
+                (let ((col (cdr pos)))
+                  (move-to-column col)
+                  (throw 'found (point)))))))
+        nil))))
+
+(defun alacritty-next-prompt (n)
+  "Move to the end of the Nth next prompt in the buffer.
+With prefix argument N, move forward N prompts."
+  (interactive "p")
+  (if (and alacritty-use-prompt-detection-method
+           (alacritty--prompt-tracking-enabled-p)
+           alacritty--term)
+      (let* ((positions (alacritty--module-get-prompt-positions alacritty--term))
+             (history-size (alacritty--module-history-size alacritty--term))
+             (current-line (line-number-at-pos))
+             (found-count 0))
+        (catch 'done
+          (dolist (pos positions)
+            (let* ((term-line (car pos))
+                   (buffer-line (+ term-line history-size 1)))
+              (when (> buffer-line current-line)
+                (setq found-count (1+ found-count))
+                (when (= found-count n)
+                  (goto-char (point-min))
+                  (forward-line (1- buffer-line))
+                  (move-to-column (cdr pos))
+                  (throw 'done t))))))
+        (unless (= found-count n)
+          (message "No more prompts")))
+    ;; Fallback to term-prompt-regexp
+    (term-next-prompt n)))
+
+(defun alacritty-previous-prompt (n)
+  "Move to the end of the Nth previous prompt in the buffer.
+With prefix argument N, move backward N prompts."
+  (interactive "p")
+  (if (and alacritty-use-prompt-detection-method
+           (alacritty--prompt-tracking-enabled-p)
+           alacritty--term)
+      (let* ((positions (alacritty--module-get-prompt-positions alacritty--term))
+             (history-size (alacritty--module-history-size alacritty--term))
+             (current-line (line-number-at-pos))
+             (found-count 0))
+        (catch 'done
+          (dolist (pos (reverse positions))
+            (let* ((term-line (car pos))
+                   (buffer-line (+ term-line history-size 1)))
+              (when (< buffer-line current-line)
+                (setq found-count (1+ found-count))
+                (when (= found-count n)
+                  (goto-char (point-min))
+                  (forward-line (1- buffer-line))
+                  (move-to-column (cdr pos))
+                  (throw 'done t))))))
+        (unless (= found-count n)
+          (message "No more prompts")))
+    ;; Fallback to term-prompt-regexp
+    (term-previous-prompt n)))
+
+(defun alacritty--get-beginning-of-line (&optional pt)
+  "Find the start of the line, bypassing line wraps.
+If PT is specified, find its beginning of the line instead of the beginning
+of the line at cursor."
+  (save-excursion
+    (when pt (goto-char pt))
+    (beginning-of-line)
+    ;; Skip over fake newlines (from line wrapping)
+    (while (and (not (bobp))
+                (memq (1- (line-number-at-pos)) alacritty--fake-newlines))
+      (forward-char -1)
+      (beginning-of-line))
+    (point)))
+
+(defun alacritty--get-end-of-line (&optional pt)
+  "Find the end of the line, bypassing line wraps.
+If PT is specified, find its end of the line instead of the end
+of the line at cursor."
+  (save-excursion
+    (when pt (goto-char pt))
+    (end-of-line)
+    ;; Skip over fake newlines (from line wrapping)
+    (while (memq (line-number-at-pos) alacritty--fake-newlines)
+      (forward-char)
+      (end-of-line))
+    (point)))
+
+(defun alacritty-beginning-of-line ()
+  "Move point to the beginning of the line.
+Move the point to the first character after the shell prompt on this line.
+If the point is already there, move to the beginning of the line.
+Effectively toggle between the two positions."
+  (interactive "^")
+  (let ((prompt-pt (alacritty--get-prompt-point))
+        (line-start (alacritty--get-beginning-of-line)))
+    (if (and prompt-pt
+             (>= prompt-pt line-start)
+             (<= prompt-pt (alacritty--get-end-of-line))
+             (/= (point) prompt-pt))
+        (goto-char prompt-pt)
+      (goto-char line-start))))
+
+(defun alacritty-end-of-line ()
+  "Move point to the end of the line, bypassing line wraps."
+  (interactive "^")
+  (goto-char (alacritty--get-end-of-line)))
+
 ;; Utility commands
 
 (defun alacritty-clear-scrollback ()
   "Clear the terminal scrollback buffer."
   (interactive)
+  (when alacritty--term
+    (alacritty--module-clear-prompt-positions alacritty--term))
   (alacritty--send-string "\e[3J\e[H\e[2J"))
 
 (defun alacritty-reset ()

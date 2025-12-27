@@ -43,6 +43,15 @@ impl Dimensions for TermSize {
     }
 }
 
+/// Position of a prompt in the terminal (for prompt navigation)
+#[derive(Debug, Clone, Copy)]
+pub struct PromptPosition {
+    /// Line number in the terminal grid (can be negative for scrollback)
+    pub line: i32,
+    /// Column where the prompt ends (cursor position after prompt)
+    pub column: usize,
+}
+
 /// Events collected during terminal processing
 #[derive(Debug, Clone)]
 pub enum TermEvent {
@@ -52,6 +61,11 @@ pub enum TermEvent {
     ClipboardLoad,
     CursorBlinkingChange,
     PtyWrite(String),
+    /// OSC 51;A - Directory and prompt tracking: user@host:path
+    /// This marks the end of a prompt and provides directory info
+    PromptEnd(String),
+    /// OSC 51;E - Eval command from shell
+    EvalCommand(String),
 }
 
 /// Event listener that collects events to be returned to Emacs
@@ -95,6 +109,9 @@ pub struct AlacrittyTerm {
     event_listener: EmacsEventListener,
     size: Mutex<TermSize>,
     title: Mutex<String>,
+    /// Track the current cursor position for prompt tracking
+    /// This stores the (line, column) where the last prompt ended
+    prompt_positions: Mutex<Vec<PromptPosition>>,
 }
 
 impl AlacrittyTerm {
@@ -115,15 +132,120 @@ impl AlacrittyTerm {
             event_listener,
             size: Mutex::new(size),
             title: Mutex::new(String::new()),
+            prompt_positions: Mutex::new(Vec::new()),
         }
     }
 
     /// Process input bytes from the PTY (called from Emacs process filter)
     /// This is the key function - it feeds data to the terminal parser
+    /// It also scans for vterm-style OSC 51 sequences before passing to the terminal.
     fn process_bytes(&self, bytes: &[u8]) {
+        // Scan for OSC 51 sequences (vterm-style directory and command passing)
+        // Format: ESC ] 51 ; <command> <data> ESC \
+        // Where <command> is 'A' for directory/prompt, 'E' for eval
         let mut term = self.term.lock();
         let mut processor = self.processor.lock();
-        processor.advance(&mut *term, bytes);
+
+        let mut i = 0;
+        let mut last_chunk_start = 0;
+
+        while i < bytes.len() {
+            // Look for ESC ] (OSC start)
+            if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b']' {
+                // Check if this is OSC 51
+                if i + 4 < bytes.len()
+                    && bytes[i + 2] == b'5'
+                    && bytes[i + 3] == b'1'
+                    && bytes[i + 4] == b';'
+                {
+                    // Process any bytes before this OSC sequence
+                    if last_chunk_start < i {
+                        processor.advance(&mut *term, &bytes[last_chunk_start..i]);
+                    }
+
+                    // Find the end of the OSC sequence (ESC \ or BEL)
+                    let osc_start = i + 5; // After "ESC ] 51 ;"
+                    let mut osc_end = osc_start;
+                    let mut found_end = false;
+
+                    while osc_end < bytes.len() {
+                        // Check for ESC \ (ST - String Terminator)
+                        if bytes[osc_end] == 0x1b
+                            && osc_end + 1 < bytes.len()
+                            && bytes[osc_end + 1] == b'\\'
+                        {
+                            found_end = true;
+                            break;
+                        }
+                        // Check for BEL (alternative terminator)
+                        if bytes[osc_end] == 0x07 {
+                            found_end = true;
+                            break;
+                        }
+                        osc_end += 1;
+                    }
+
+                    if found_end && osc_start < osc_end {
+                        let osc_content = &bytes[osc_start..osc_end];
+                        if !osc_content.is_empty() {
+                            let command = osc_content[0];
+                            let data = if osc_content.len() > 1 {
+                                String::from_utf8_lossy(&osc_content[1..]).to_string()
+                            } else {
+                                String::new()
+                            };
+
+                            match command {
+                                b'A' => {
+                                    // OSC 51;A - Prompt end / directory tracking
+                                    // Record the current cursor position as a prompt position
+                                    let cursor = term.grid().cursor.point;
+                                    let prompt_pos = PromptPosition {
+                                        line: cursor.line.0,
+                                        column: cursor.column.0,
+                                    };
+                                    self.prompt_positions.lock().push(prompt_pos);
+                                    self.event_listener
+                                        .events
+                                        .lock()
+                                        .push(TermEvent::PromptEnd(data));
+                                }
+                                b'E' => {
+                                    // OSC 51;E - Eval command
+                                    self.event_listener
+                                        .events
+                                        .lock()
+                                        .push(TermEvent::EvalCommand(data));
+                                }
+                                _ => {
+                                    // Unknown command, pass through to terminal
+                                    processor.advance(
+                                        &mut *term,
+                                        &bytes[i..osc_end
+                                            + if bytes[osc_end] == 0x1b { 2 } else { 1 }],
+                                    );
+                                }
+                            }
+                        }
+
+                        // Skip past the OSC sequence
+                        i = if bytes[osc_end] == 0x1b {
+                            osc_end + 2 // ESC \
+                        } else {
+                            osc_end + 1 // BEL
+                        };
+                        last_chunk_start = i;
+                        continue;
+                    }
+                }
+            }
+            i += 1;
+        }
+
+        // Process remaining bytes
+        if last_chunk_start < bytes.len() {
+            processor.advance(&mut *term, &bytes[last_chunk_start..]);
+        }
     }
 
     fn resize(&self, cols: usize, lines: usize) {
@@ -177,6 +299,16 @@ impl AlacrittyTerm {
 
     fn get_mode(&self) -> TermMode {
         *self.term.lock().mode()
+    }
+
+    /// Get all prompt positions
+    fn get_prompt_positions(&self) -> Vec<PromptPosition> {
+        self.prompt_positions.lock().clone()
+    }
+
+    /// Clear prompt positions (e.g., when scrollback is cleared)
+    fn clear_prompt_positions(&self) {
+        self.prompt_positions.lock().clear();
     }
 }
 
@@ -328,6 +460,18 @@ fn take_events<'e>(env: &'e Env, term: &AlacrittyTerm) -> Result<Value<'e>> {
                 let val = data.into_lisp(env)?;
                 env.cons(sym, val)?
             }
+            TermEvent::PromptEnd(info) => {
+                // OSC 51;A - prompt end with directory info (user@host:path)
+                let sym = env.intern("prompt-end")?;
+                let val = info.into_lisp(env)?;
+                env.cons(sym, val)?
+            }
+            TermEvent::EvalCommand(cmd) => {
+                // OSC 51;E - eval command from shell
+                let sym = env.intern("eval-command")?;
+                let val = cmd.into_lisp(env)?;
+                env.cons(sym, val)?
+            }
         };
         result = env.cons(event_val, result)?;
     }
@@ -411,6 +555,33 @@ fn app_cursor_mode(term: &AlacrittyTerm) -> Result<bool> {
 #[defun(name = "alacritty--module-bracketed-paste-mode")]
 fn bracketed_paste_mode(term: &AlacrittyTerm) -> Result<bool> {
     Ok(term.get_mode().contains(TermMode::BRACKETED_PASTE))
+}
+
+/// Get prompt positions for prompt navigation
+/// Returns a list of (line . column) pairs where prompts end
+/// Line numbers are relative to viewport (can be negative for scrollback)
+#[defun(name = "alacritty--module-get-prompt-positions")]
+fn get_prompt_positions<'e>(env: &'e Env, term: &AlacrittyTerm) -> Result<Value<'e>> {
+    let positions = term.get_prompt_positions();
+    let nil = env.intern("nil")?;
+
+    let mut result = nil;
+    // Build list in reverse order for cons efficiency
+    for pos in positions.into_iter().rev() {
+        let line_val = (pos.line as i64).into_lisp(env)?;
+        let col_val = (pos.column as i64).into_lisp(env)?;
+        let pair = env.cons(line_val, col_val)?;
+        result = env.cons(pair, result)?;
+    }
+
+    Ok(result)
+}
+
+/// Clear prompt positions (call when scrollback is cleared)
+#[defun(name = "alacritty--module-clear-prompt-positions")]
+fn clear_prompt_positions(term: &AlacrittyTerm) -> Result<()> {
+    term.clear_prompt_positions();
+    Ok(())
 }
 
 /// Get history (scrollback) size

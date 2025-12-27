@@ -63,6 +63,8 @@ nix develop
 | `C-c C-t` | Toggle copy mode |
 | `C-c C-l` | Clear scrollback |
 | `C-c C-q` | Send next key directly to terminal |
+| `C-c C-n` | Jump to next prompt |
+| `C-c C-p` | Jump to previous prompt |
 | `C-y` | Yank from kill ring |
 | `M-y` | Yank pop |
 
@@ -143,6 +145,12 @@ end
 
 ;; Ignore cursor blink requests from applications (default: t)
 (setq alacritty-ignore-blink-cursor t)
+
+;; Use shell-side prompt detection (default: t)
+(setq alacritty-use-prompt-detection-method t)
+
+;; Exclude prompt when copying current line (default: t)
+(setq alacritty-copy-exclude-prompt t)
 ```
 
 ### Exit hook
@@ -165,10 +173,12 @@ Define Emacs commands callable from the terminal:
 (setq alacritty-eval-cmds
       '(("find-file" find-file)
         ("message" message)
-        ("vterm-clear-scrollback" alacritty-clear-scrollback)))
+        ("alacritty-clear-scrollback" alacritty-clear-scrollback)))
 ```
 
 Then call from shell: `alacritty_cmd find-file "/path/to/file"`
+
+**Security note:** Only functions in `alacritty-eval-cmds` can be executed from the terminal. This whitelist prevents arbitrary code execution from malicious terminal output.
 
 ## Comparison with vterm (emacs-libvterm)
 
@@ -213,10 +223,10 @@ This section compares emacs-alacritty with [vterm](https://github.com/akermu/ema
 - [x] Application cursor mode
 - [x] TRAMP remote support
 - [x] Exit hooks
-- [ ] Prompt tracking and navigation
+- [x] Prompt tracking and navigation
 - [ ] Scrollback visible in normal mode
 - [ ] OSC 52 clipboard manipulation
-- [ ] Eval command whitelist security
+- [x] Eval command whitelist security
 - [ ] Cursor shape control
 - [ ] Configurable keyboard exceptions
 - [ ] Color palette customization
@@ -225,23 +235,22 @@ This section compares emacs-alacritty with [vterm](https://github.com/akermu/ema
 
 The following improvements are planned to reach feature parity with vterm. Items are ordered by priority.
 
-### Phase 1: Core Functionality (High Priority)
+### Phase 1: Core Functionality (High Priority) - COMPLETED
 
-1. **Prompt tracking and navigation**
-   - Implement prompt detection using OSC 51;A escape sequence (already parsed in shell scripts)
-   - Add `alacritty-prompt` text property to mark prompt regions
-   - Implement `alacritty-next-prompt` and `alacritty-previous-prompt` commands
-   - Add smart `alacritty-beginning-of-line` that respects prompt boundaries
+1. **Prompt tracking and navigation** ✓
+   - Implemented prompt detection using OSC 51;A escape sequence
+   - `alacritty-next-prompt` (`C-c C-n`) and `alacritty-previous-prompt` (`C-c C-p`) commands
+   - Smart `alacritty-beginning-of-line` that respects prompt boundaries in copy mode
 
 2. **Scrollback in normal mode**
    - Currently scrollback history is only visible in copy mode
    - Modify rendering to show scrollback in normal mode (like vterm)
    - Keep cursor at correct position within visible area
 
-3. **Eval command whitelist**
-   - Implement `alacritty-eval-cmds` properly with security whitelist
+3. **Eval command whitelist** ✓
+   - Implemented `alacritty-eval-cmds` with security whitelist
    - Parse OSC 51;E sequences and dispatch to whitelisted functions
-   - Document security implications
+   - Default whitelist includes: `find-file`, `message`, `alacritty-clear-scrollback`
 
 ### Phase 2: Polish (Medium Priority)
 
